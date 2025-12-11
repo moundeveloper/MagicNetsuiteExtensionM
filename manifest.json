@@ -13,8 +13,8 @@
   "commands": {
     "toggle_extension_ui": {
       "suggested_key": {
-        "default": "Alt+Shift+Z",
-        "mac": "Command+Shift+Z"
+        "default": "Alt+Shift+U",
+        "mac": "Alt+Shift+U"
       },
       "description": "Open the extension UI in a side panel"
     }
