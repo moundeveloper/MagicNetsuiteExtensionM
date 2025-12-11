@@ -9,13 +9,12 @@ let panelOpen = false;
 chrome.commands.onCommand.addListener((command) => {
   if (command === "toggle_extension_ui") {
     if (panelOpen) {
-      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-        chrome.sidePanel.setOptions({ enabled: false, tabId: tab.id });
-      });
+      chrome.sidePanel.setOptions({ enabled: false });
       panelOpen = false;
       console.log("Panel closed");
       return;
     }
+    chrome.sidePanel.setOptions({ enabled: true });
 
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       chrome.sidePanel.open({ tabId: tab.id });
