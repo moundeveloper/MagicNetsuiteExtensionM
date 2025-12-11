@@ -4,12 +4,23 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((error) => console.error(error));
 
+let panelOpen = false;
+
 chrome.commands.onCommand.addListener((command) => {
-  if (command === "open_extension_ui") {
+  if (command !== "toggle_extension_ui") return;
+
+  if (panelOpen) {
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-      chrome.sidePanel.open({ tabId: tab.id });
+      chrome.sidePanel.setOptions({ tabId: tab.id, path: "" });
     });
+    panelOpen = false;
+    return;
   }
+
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    chrome.sidePanel.open({ tabId: tab.id });
+  });
+  panelOpen = true;
 });
 
 // Sniff CSV files
