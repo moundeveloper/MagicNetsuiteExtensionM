@@ -1,0 +1,69 @@
+{
+  "manifest_version": 3,
+  "name": "Magic Netsuite",
+  "version": "1.0",
+  "description": "Press a keyboard shortcut to open the extension UI in a full tab.",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "dist/vue-ui/index.html"
+  },
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "open_extension_ui": {
+      "suggested_key": {
+        "default": "Alt+Shift+U",
+        "mac": "Command+Shift+U"
+      },
+      "description": "Open the extension UI in a tab"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "scripts.js",
+        "netsuiteApi.js",
+        "content.js",
+        "customRecords.js",
+        "sandboxCode.js",
+        "exportRecord.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "sidePanel",
+    "scripting",
+    "clipboardWrite",
+    "tabs",
+    "webRequest",
+    "cookies",
+    "storage",
+    "activeTab",
+    "webRequestBlocking",
+    "declarativeNetRequest",
+    "*://*.netsuite.com/*",
+    "downloads",
+    "debugger"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
+}

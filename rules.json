@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "X-Response-Body",
+          "operation": "set",
+          "value": "captured"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.netsuite.com/*",
+      "resourceTypes": ["xmlhttprequest", "script", "other"]
+    }
+  }
+]
