@@ -11,12 +11,12 @@
   },
   "host_permissions": ["<all_urls>"],
   "commands": {
-    "open_extension_ui": {
+    "toggle_extension_ui": {
       "suggested_key": {
-        "default": "Alt+Shift+U",
-        "mac": "Command+Shift+U"
+        "default": "Alt+Shift+Z",
+        "mac": "Command+Shift+Z"
       },
-      "description": "Open the extension UI in a tab"
+      "description": "Open the extension UI in a side panel"
     }
   },
   "web_accessible_resources": [
