@@ -1,28 +1,39 @@
+// Non-blocking runQuickScript - runs on main thread but yields to UI
 window.runQuickScript = async (N, { code }) => {
-  const logs = []; // Array of structured log entries
+  const logs = [];
 
   const stringifyArg = (arg) => {
     if (typeof arg === "object" && arg !== null) {
       try {
-        return JSON.stringify(arg, null, 2); // pretty print objects
+        return JSON.stringify(arg, null, 2);
       } catch {
-        return String(arg); // fallback
+        return String(arg);
       }
     }
     return String(arg);
   };
 
+  // Helper to yield control back to the browser
+  const yieldToMain = () => {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
   try {
     const fakeConsole = {
-      log: (...args) =>
-        logs.push({ type: "log", values: args.map(stringifyArg) }),
-      warn: (...args) =>
-        logs.push({ type: "warn", values: args.map(stringifyArg) }),
-      error: (...args) =>
-        logs.push({ type: "error", values: args.map(stringifyArg) }),
+      log: (...args) => {
+        logs.push({ type: "log", values: args.map(stringifyArg) });
+        return yieldToMain(); // Yield after each log
+      },
+      warn: (...args) => {
+        logs.push({ type: "warn", values: args.map(stringifyArg) });
+        return yieldToMain();
+      },
+      error: (...args) => {
+        logs.push({ type: "error", values: args.map(stringifyArg) });
+        return yieldToMain();
+      },
     };
 
-    // Create a proxy for N.log that intercepts calls
     const originalLog = N.log;
     const fakeLog = {
       LOG_LEVELS: originalLog?.LOG_LEVELS || [
@@ -45,15 +56,11 @@ window.runQuickScript = async (N, { code }) => {
       },
     };
 
-    // Create a modified N object with the fake log
     const modifiedN = {
       ...N,
       log: fakeLog,
     };
 
-    console.log("Modified N: ", modifiedN);
-
-    // Destructure all keys of the modified N for easy access
     const destructuredKeys = Object.keys(modifiedN).join(", ");
     const wrappedCode = `
         "use strict";
@@ -62,9 +69,16 @@ window.runQuickScript = async (N, { code }) => {
       `;
 
     const asyncFn = new Function("N", "console", wrappedCode);
+
+    // Yield before executing to allow UI update
+    await yieldToMain();
+
     await asyncFn(modifiedN, fakeConsole);
+
+    // Yield after execution
+    await yieldToMain();
   } catch (err) {
-    logs.push({ type: "error", values: ["Execution error: " + err.message] });
+    logs.push({ type: "error", values: ["Execution error: " + err] });
   }
 
   return logs;

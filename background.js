@@ -4,25 +4,43 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((error) => console.error(error));
 
-let panelOpen = false;
+/** @type {"open" | "close"} */
+let panelState = "close";
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "sidePanel") return;
+
+  panelState = "open";
+  console.log("Panel state set to OPEN");
+
+  port.onDisconnect.addListener(() => {
+    panelState = "close";
+    console.log("Panel state set to CLOSE (panel disconnected)");
+  });
+});
 
 chrome.commands.onCommand.addListener((command) => {
   if (command === "toggle_extension_ui") {
-    if (panelOpen) {
+    if (panelState === "open") {
       chrome.sidePanel.setOptions({ enabled: false });
-      panelOpen = false;
+      chrome.sidePanel.setOptions({ enabled: true });
       console.log("Panel closed");
       return;
     }
-    chrome.sidePanel.setOptions({ enabled: true });
 
     chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
       chrome.sidePanel.open({ tabId: tab.id });
     });
 
     console.log("Panel opened");
-    panelOpen = true;
   }
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "CLOSE_PANEL") return;
+  chrome.sidePanel.setOptions({ enabled: false });
+  chrome.sidePanel.setOptions({ enabled: true });
+  console.log("Panel closed");
 });
 
 // Sniff CSV files

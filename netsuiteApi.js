@@ -79,4 +79,9 @@ const handlers = {
     console.log("Export Record action received");
     return window.exportRecord(modules, config);
   },
+  CHECK_CONNECTION: async ({ modules }) => {
+    const N = await loadNetsuiteApi();
+    if (N) return "connected";
+    return "disconnected";
+  },
 };
