@@ -36,6 +36,15 @@ window.getScripts = async (N, { scriptId = null } = {}) => {
   return results;
 };
 
+window.getScriptTypes = async (N) => {
+  const { query } = N;
+  const sql = `SELECT name as label, id FROM scripttype ORDER BY name ASC;`;
+  const queryConfig = { query: sql };
+  const resultSet = await query.runSuiteQL.promise(queryConfig);
+  const results = resultSet.asMappedResults();
+  return results;
+};
+
 window.getScriptUrl = (N, { scriptId }) => {
   console.log("Script ID:", scriptId);
 
@@ -132,4 +141,58 @@ window.getDeployedScriptFiles = async ({ query, url }, { recordType }) => {
   } catch (error) {
     log.error("Error", error);
   }
+};
+
+window.getDeployments = async ({ query, url }, { scriptId }) => {
+  console.log("Script ID:", scriptId);
+
+  if (!scriptId) {
+    return null;
+  }
+
+  try {
+    const sql = `
+    SELECT
+         scriptid, 
+         recordtype,
+         isdeployed, 
+         status, 
+         loglevel,
+         primarykey
+    FROM
+        scriptdeployment
+    WHERE
+        script = ?
+    `;
+
+    const queryConfig = {
+      query: sql,
+      params: [scriptId],
+    };
+
+    const resultSet = await query.runSuiteQL.promise(queryConfig);
+    const results = resultSet.asMappedResults();
+
+    return results;
+    console.log(`Retrieved ${results.length} script deployments`);
+  } catch (error) {
+    log.error("Error", error);
+  }
+};
+
+window.getScriptDeploymentUrl = async (N, { deployment }) => {
+  console.log("Deployment ID:", deployment);
+
+  if (!deployment) {
+    return null;
+  }
+
+  const { url } = N;
+
+  const scriptUrl =
+    "https://" +
+    url.resolveDomain({ hostType: url.HostType.APPLICATION }) +
+    "/app/common/scripting/scriptrecord.nl?id=" +
+    deployment;
+  return scriptUrl;
 };

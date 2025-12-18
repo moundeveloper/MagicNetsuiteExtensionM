@@ -97,4 +97,16 @@ const handlers = {
     console.log("Available Modules action received");
     return Object.keys(modules);
   },
+  SCRIPT_TYPES: async ({ modules }) => {
+    console.log("Script Types action received");
+    return window.getScriptTypes(modules);
+  },
+  SCRIPT_DEPLOYMENTS: async ({ modules, payload: { scriptId } }) => {
+    console.log("Script Deployments action received");
+    return window.getDeployments(modules, { scriptId });
+  },
+  SCRIPT_DEPLOYMENT_URL: async ({ modules, payload: { deployment } }) => {
+    console.log("Script Deployment URL action received");
+    return window.getScriptDeploymentUrl(modules, { deployment });
+  },
 };
