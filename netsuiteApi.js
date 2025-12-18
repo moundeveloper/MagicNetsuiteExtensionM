@@ -109,4 +109,8 @@ const handlers = {
     console.log("Script Deployment URL action received");
     return window.getScriptDeploymentUrl(modules, { deployment });
   },
+  SUITELET_URL: async ({ modules, payload: { script, deployment } }) => {
+    console.log("Open Suitelet action received");
+    return window.getSuiteletUrl(modules, { script, deployment });
+  },
 };

@@ -196,3 +196,14 @@ window.getScriptDeploymentUrl = async (N, { deployment }) => {
     deployment;
   return scriptUrl;
 };
+
+window.getSuiteletUrl = async (N, { script, deployment }) => {
+  const { url } = N;
+  const suiteletUrl = url.resolveScript({
+    scriptId: script,
+    deploymentId: deployment,
+    returnExternalUrl: false,
+  });
+  console.log("Suitelet URL:", suiteletUrl);
+  return suiteletUrl;
+};
