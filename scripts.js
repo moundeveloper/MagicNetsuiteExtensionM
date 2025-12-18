@@ -199,11 +199,14 @@ window.getScriptDeploymentUrl = async (N, { deployment }) => {
 
 window.getSuiteletUrl = async (N, { script, deployment }) => {
   const { url } = N;
-  const suiteletUrl = url.resolveScript({
-    scriptId: script,
-    deploymentId: deployment,
-    returnExternalUrl: false,
-  });
+  const suiteletUrl =
+    "https://" +
+    url.resolveDomain({ hostType: url.HostType.APPLICATION }) +
+    url.resolveScript({
+      scriptId: script,
+      deploymentId: deployment,
+      returnExternalUrl: false,
+    });
   console.log("Suitelet URL:", suiteletUrl);
   return suiteletUrl;
 };
