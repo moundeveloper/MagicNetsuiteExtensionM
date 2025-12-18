@@ -7,12 +7,13 @@ window.getScripts = async (N, { scriptId = null } = {}) => {
           script.scriptid,
           script.id,
           script.name,
-          script.scriptfile,
           script.scripttype,
-          entity.entityid as owner
+          entity.entityid as owner,
+		      file.name as scriptfile
       FROM
           script
           INNER JOIN entity on script.owner = entity.id
+		      INNER JOIN file on file.id = script.scriptfile
     `;
 
   // Only add WHERE if scriptId is provided
