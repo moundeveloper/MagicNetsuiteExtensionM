@@ -61,7 +61,12 @@ const handlers = {
   },
   RUN_QUICK_SCRIPT: async ({ modules, payload: { code } }) => {
     console.log("Run Quick Script action received");
-    return window.runQuickScript(modules, { code });
+    try {
+      return await window.runQuickScript(modules, { code });
+    } catch (err) {
+      // Return the error as a log entry
+      return [{ type: "error", values: ["Script execution error: " + err.message] }];
+    }
   },
   SCRIPTS_DEPLOYED: async ({ modules, payload: { recordType } }) => {
     console.log("Scripts Deployed action received");
