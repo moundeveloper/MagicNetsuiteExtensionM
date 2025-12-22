@@ -43,6 +43,38 @@ chrome.runtime.onMessage.addListener((message) => {
   console.log("Panel closed");
 });
 
+// TAB CHANGED
+function notifyTabChange(reason, tab) {
+  chrome.runtime.sendMessage({
+    type: "TAB_CONTEXT_CHANGED",
+    reason,
+    url: tab.url,
+    tabId: tab.id,
+  });
+}
+
+// 1️⃣ URL changes → wait for load complete
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tab.url) {
+    notifyTabChange("url-loaded", tab);
+  }
+});
+
+// 2️⃣ Tab activated → wait until loaded
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.status === "complete") {
+    notifyTabChange("tab-activated", tab);
+  }
+});
+
+// 3️⃣ New tab → wait for load complete
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.status === "complete" && tab.url) {
+    notifyTabChange("tab-created", tab);
+  }
+});
+
 // Sniff CSV files
 chrome.downloads.onCreated.addListener((downloadItem) => {
   if (!downloadItem.finalUrl.includes(".csv")) return;
