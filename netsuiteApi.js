@@ -12,48 +12,34 @@ const loadNetsuiteApi = async () => {
 };
 
 // Central listener for messages from the extension
-window.addEventListener("fromExtension", async ({ detail: request }) => {
-  const { action, data: payload } = request;
+window.addEventListener("message", async (event) => {
+  if (event.source !== window) return;
+  if (event.data?.type !== "FROM_EXTENSION") return;
+
+  const { requestId, action, data: payload } = event.data.payload;
 
   const handler = handlers[action];
-  if (handler === handlers.CHECK_CONNECTION) {
-    const modules = await loadNetsuiteApi();
-    const result = (await handler({ modules, payload })) || null;
-    sendToExtension({ status: "ok", message: result });
-
-    return;
+  if (!handler) {
+    return sendToExtension({
+      requestId,
+      status: "error",
+      message: `No handler for ${action}`,
+    });
   }
 
-  if (handler) {
-    try {
-      const N = await loadNetsuiteApi();
-      if (N) {
-        console.log(
-          "%cNetSuite Utils:",
-          "color:green;font-weight:bold",
-          "N Module Loaded:",
-          N
-        );
-      } else {
-        console.log("Unable to load Script Module.");
-      }
+  try {
+    const modules = await loadNetsuiteApi();
+    const result = (await handler({ modules, payload })) || null;
 
-      const result = (await handler({ modules: N, payload })) || null;
-      sendToExtension({ status: "ok", message: result });
-    } catch (err) {
-      console.error("Handler error:", err);
-      sendToExtension({ status: "error", message: err.message });
-    }
-  } else {
-    console.warn("No handler found for action:", action);
-    sendToExtension({ status: "error", message: `No handler for ${action}` });
+    sendToExtension({ requestId, status: "ok", message: result });
+  } catch (err) {
+    sendToExtension({ requestId, status: "error", message: err.message });
   }
 });
 
-// Utility to send messages back to the extension
-function sendToExtension(msg) {
-  window.dispatchEvent(new CustomEvent("toExtension", { detail: msg }));
-}
+const sendToExtension = (msg) => {
+  window.postMessage({ type: "TO_EXTENSION", payload: msg }, "*");
+};
 
 // Map of handlers keyed by action names
 const handlers = {

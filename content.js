@@ -21,26 +21,30 @@ const injectScript = (file) => {
     console.log("Error", error);
   }
 })();
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  console.log("Message from popup:", msg);
+  const requestId = Math.random().toString(36).substring(2, 10);
 
-  // Create the event for the page
-  const event = new CustomEvent("fromExtension", { detail: msg });
+  const handleResponse = (event) => {
+    if (event.source !== window) return;
+    const data = event.data?.payload;
+    if (!data || event.data?.type !== "TO_EXTENSION") return;
+    if (data.requestId !== requestId) return; // ignore other responses
 
-  // Listen once for the response from the page
-  const handleResponse = (e) => {
-    console.log("Got response from page:", e);
-    sendResponse(e.detail); // send it back to the popup
-    window.removeEventListener("toExtension", handleResponse);
+    sendResponse(data);
+    window.removeEventListener("message", handleResponse);
   };
 
-  window.addEventListener("toExtension", handleResponse);
+  window.addEventListener("message", handleResponse);
 
-  // Dispatch the request to the page
-  window.dispatchEvent(event);
+  window.postMessage(
+    { type: "FROM_EXTENSION", payload: { ...msg, requestId } },
+    "*"
+  );
 
-  return true; // keep sendResponse alive for async
+  return true; // keep sendResponse alive
 });
+
 // Intercept XMLHttpRequest
 const originalXHROpen = XMLHttpRequest.prototype.open;
 const originalXHRSend = XMLHttpRequest.prototype.send;
