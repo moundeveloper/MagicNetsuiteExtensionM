@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-_yiode7B.js";export{t as conf,e as language};

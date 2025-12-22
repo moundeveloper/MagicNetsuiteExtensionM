@@ -16,7 +16,7 @@ FROM
 
   const results = resultSet.asMappedResults();
 
-  console.log(results);
+  console.log("Custom Records: ", results.length);
 
   return results;
 };

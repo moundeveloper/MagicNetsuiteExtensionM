@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-I235G2Dr.js";export{t as conf,e as language};

@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-Bjb1icB7.js";export{t as conf,e as language};

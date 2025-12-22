@@ -172,9 +172,8 @@ window.getDeployments = async ({ query, url }, { scriptId }) => {
 
     const resultSet = await query.runSuiteQL.promise(queryConfig);
     const results = resultSet.asMappedResults();
-
-    return results;
     console.log(`Retrieved ${results.length} script deployments`);
+    return results;
   } catch (error) {
     log.error("Error", error);
   }

@@ -17,6 +17,18 @@
         "mac": "Alt+Shift+U"
       },
       "description": "Open the extension UI in a side panel"
+    },
+    "open-panel-scripts": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+X"
+      },
+      "description": "Open side panel - Scripts view"
+    },
+    "open-panel-custom-records": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y"
+      },
+      "description": "Open side panel - Custom Records view"
     }
   },
   "web_accessible_resources": [

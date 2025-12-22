@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-3tPaukVO.js";export{t as conf,e as language};

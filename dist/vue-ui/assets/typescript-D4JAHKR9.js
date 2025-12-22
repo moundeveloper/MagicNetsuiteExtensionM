@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-DLHusn4d.js";export{t as conf,e as language};

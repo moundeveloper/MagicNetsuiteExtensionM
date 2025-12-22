@@ -90,6 +90,31 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
     });
 });
 
+// Shortcut View
+chrome.commands.onCommand.addListener((command) => {
+  const commandsMap = {
+    "open-panel-scripts": "Scripts",
+    "open-panel-custom-records": "Custom Records",
+  };
+
+  panelState = "open";
+  let view = "home";
+
+  if (!commandsMap[command]) {
+    return;
+  }
+
+  view = commandsMap[command];
+  // store intent ONLY
+  chrome.storage.session.set({ openView: view });
+
+  // open EXACTLY like toggle
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (!tab?.id) return;
+    chrome.sidePanel.open({ tabId: tab.id });
+  });
+});
+
 /* chrome.webRequest.onBeforeSendHeaders.addListener(
   async function (details) {
     console.log("=== NetSuite REQUEST ===");
