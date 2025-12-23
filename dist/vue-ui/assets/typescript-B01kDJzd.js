@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-C_JQdlon.js";export{t as conf,e as language};

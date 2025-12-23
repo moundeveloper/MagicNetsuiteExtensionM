@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-BOm1OL36.js";export{t as conf,e as language};
