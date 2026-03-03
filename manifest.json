@@ -1,0 +1,105 @@
+{
+  "manifest_version": 3,
+  "name": "Magic Netsuite",
+  "version": "1.0",
+  "description": "Make netsuite work like magic",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "dist/vue-ui/index.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    },
+    "default_title": "Magic Netsuite"
+  },
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "toggle_extension_ui": {
+      "suggested_key": {
+        "default": "Alt+Z",
+        "mac": "Alt+Z"
+      },
+      "description": "Open the extension UI in a side panel"
+    },
+    "open_panel_scripts": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+X"
+      },
+      "description": "Open side panel - Scripts view"
+    },
+    "open_panel_custom_records": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y"
+      },
+      "description": "Open side panel - Custom Records view"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "netsuiteApi/scripts.js",
+        "netsuiteApi/netsuiteApi.js",
+        "netsuiteApi/content.js",
+        "netsuiteApi/customRecords.js",
+        "netsuiteApi/sandboxCode.js",
+        "netsuiteApi/exportRecord.js",
+        "netsuiteApi/logs.js",
+        "netsuiteApi/mediaItems.js",
+        "netsuiteApi/advancedPdfTemplates.js",
+        "dist/vue-ui/*",
+        "content/content_export.js",
+        "content/core/injection/*.js",
+        "content/core/messaging/*.js",
+        "content/core/interceptors/*.js",
+        "content/utils/*.js",
+        "content/ui/**/*.js",
+        "content/keyboard/*.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.netsuite.com/*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "sidePanel",
+    "scripting",
+    "clipboardWrite",
+    "tabs",
+    "webRequest",
+    "cookies",
+    "storage",
+    "activeTab",
+    "webRequestBlocking",
+    "declarativeNetRequest",
+    "*://*.netsuite.com/*",
+    "downloads",
+    "debugger"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
+}
