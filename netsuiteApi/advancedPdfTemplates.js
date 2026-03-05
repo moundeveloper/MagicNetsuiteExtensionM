@@ -30,8 +30,6 @@ WHERE AdvancedPdfTemplate.scriptId NOT LIKE 'STDTMPL%'
 
   const allLinks = await getPdfTemplateLinks();
 
-  console.log("PDF Template Links: ", allLinks);
-
   // Example: exclude savedsearchid = -1
   const allLinksById = new Map();
 
