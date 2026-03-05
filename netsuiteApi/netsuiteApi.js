@@ -70,6 +70,15 @@ const handlers = {
     console.log("Advanced PDF Templates action received");
     return window.getAdvancedPDFTemplates(modules);
   },
+  GET_TEMPLATES_CONTENT: async ({ modules, payload }) => {
+    console.log("Get Templates Content action received:", payload.templateId);
+    return window.getAdvancedPDFTemplatesContent(modules, payload);
+  },
+  SAVE_TEMPLATE: async ({ modules, payload }) => {
+    console.log("Save Templates Content action received:", payload.templateId);
+    console.log("payload", payload);
+    return window.savePdfTemplate(modules, payload);
+  },
   SCRIPT_URL: async ({ modules, payload: { scriptId } }) => {
     console.log("Script URL action received:", scriptId);
     return window.getScriptUrl(modules, { scriptId });

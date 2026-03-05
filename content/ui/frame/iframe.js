@@ -28,6 +28,7 @@ export const injectUI = (route = "") => {
   const src = route ? `${baseUrl}#${route}` : baseUrl;
 
   iframe = document.createElement("iframe");
+  iframe.allow = "clipboard-read; clipboard-write";
   iframe.id = FRAME_ID;
   iframe.src = src;
 
