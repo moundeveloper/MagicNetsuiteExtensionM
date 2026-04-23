@@ -31,12 +31,37 @@ window.getCustomRecordUrl = (N, { recordId }) => {
   return customRecordUrl;
 };
 
+window.getCustomRecordListUrl = (N, { recordId }) => {
+  const { url } = N;
+
+  const customRecordListUrl = `https://${url.resolveDomain({ hostType: url.HostType.APPLICATION })}/app/common/custom/custrecordentrylist.nl?rectype=${recordId}`;
+
+  return customRecordListUrl;
+};
+
 window.getCurrentRecordIdType = (N) => {
   const { currentRecord } = N;
   const currentRec = currentRecord.get();
   const currentRecordData = { id: currentRec.id, type: currentRec.type };
   console.log("Current Record Data:", currentRecordData);
   return currentRecordData;
+};
+
+window.getCurrentUser = ({ runtime }) => {
+  const user = runtime.getCurrentUser();
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    roleId: user.roleId,
+    location: user.location,
+    locationId: user.locationId,
+    department: user.department,
+    departmentId: user.departmentId,
+    subsidiary: user.subsidiary,
+    subsidiaryId: user.subsidiaryId
+  };
 };
 
 window.getAllRecordTypes = ({ record, query }) => {

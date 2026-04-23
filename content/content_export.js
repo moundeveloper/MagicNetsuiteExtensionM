@@ -10,6 +10,7 @@ import { setupFetchInterceptor } from "./core/interceptors/fetchInterceptor.js";
 import { createDock } from "./ui/dock/dock.js";
 import { initUIWidgets } from "./ui/widgets/logo.js";
 import { setupKeyboardShortcuts } from "./keyboard/shortcuts.js";
+import { createPalette } from "./ui/palette/palette.js";
 
 // ============================================================================
 // Initialize Extension
@@ -32,6 +33,7 @@ export const initExtension = async () => {
     // Initialize UI components
     initUIWidgets();
     await createDock();
+    await createPalette();
 
     // Setup keyboard shortcuts
     setupKeyboardShortcuts();

@@ -5,8 +5,11 @@ import {
 } from "./constants.js";
 import { StreamHandler, NormalRequestHandler } from "./handlers.js";
 import { RequestManager } from "./requestManager.js";
+import { scrapeSuiteScriptModules } from "../../modules/suiteScriptScraper.js";
 
 const requestManager = new RequestManager();
+
+const SCRAPE_ACTION = "SCRAPE_SUITESCRIPT_MODULES";
 
 export const setupMessageListener = () => {
   chrome.runtime.onConnect.addListener((port) => {
@@ -17,6 +20,14 @@ export const setupMessageListener = () => {
       const requestId = generateRequestId();
 
       if (mode !== REQUEST_MODES.STREAM) return;
+
+      // ── Intercept: scrape docs directly in content script ──
+      if (action === SCRAPE_ACTION) {
+        scrapeSuiteScriptModules(data?.baseUrl, (chunk) => {
+          port.postMessage({ ...chunk, requestId });
+        });
+        return;
+      }
 
       const handler = new StreamHandler(requestId, (chunk) => {
         port.postMessage(chunk);

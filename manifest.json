@@ -48,6 +48,7 @@
     {
       "resources": [
         "netsuiteApi/scripts.js",
+        "netsuiteApi/suiteQL.js",
         "netsuiteApi/netsuiteApi.js",
         "netsuiteApi/content.js",
         "netsuiteApi/customRecords.js",
@@ -63,7 +64,8 @@
         "content/core/interceptors/*.js",
         "content/utils/*.js",
         "content/ui/**/*.js",
-        "content/keyboard/*.js"
+        "content/keyboard/*.js",
+        "content/modules/*.js"
       ],
       "matches": ["<all_urls>"]
     }

@@ -43,7 +43,10 @@ window.addEventListener("message", async (event) => {
       return;
     }
 
-    const result = (await handler({ modules, payload })) || null;
+    const csrfToken = document.querySelector('input[name="_csrf"]')?.value;
+
+    const result =
+      (await handler({ modules, payload, csrfToken: csrfToken })) || null;
 
     sendToExtension({ requestId, status: "ok", message: result });
   } catch (err) {
@@ -79,6 +82,10 @@ const handlers = {
     console.log("payload", payload);
     return window.savePdfTemplate(modules, payload);
   },
+  PREVIEW: async ({ modules, payload }) => {
+    console.log("Preview action received:", payload.templateId);
+    return window.previewPdfTemplate(modules, payload);
+  },
   SCRIPT_URL: async ({ modules, payload: { scriptId } }) => {
     console.log("Script URL action received:", scriptId);
     return window.getScriptUrl(modules, { scriptId });
@@ -86,6 +93,10 @@ const handlers = {
   CUSTOM_RECORD_URL: async ({ modules, payload: { recordId } }) => {
     console.log("Custom Record URL action received:", recordId);
     return window.getCustomRecordUrl(modules, { recordId });
+  },
+  CUSTOM_RECORD_LIST_URL: async ({ modules, payload: { recordId } }) => {
+    console.log("Custom Record URL action received:", recordId);
+    return window.getCustomRecordListUrl(modules, { recordId });
   },
   RUN_QUICK_SCRIPT: async ({ modules, payload: { code, requestId, mode } }) => {
     console.log("Run Quick Script action received", { mode });
@@ -110,9 +121,17 @@ const handlers = {
     console.log("Scripts Deployed action received");
     return window.getDeployedScriptFiles(modules, { recordType });
   },
+  SCRIPT_FILES: async ({ modules, payload: { scriptIds } }) => {
+    console.log("Script Files action received", { scriptIds });
+    return window.getScriptFiles(modules, { scriptIds });
+  },
   CURRENT_REC_TYPE: async ({ modules }) => {
     console.log("Current Record Type action received");
     return window.getCurrentRecordIdType(modules);
+  },
+  CURRENT_USER: async ({ modules }) => {
+    console.log("Current User action received");
+    return window.getCurrentUser(modules);
   },
   EXPORT_RECORD: async ({ modules, payload: { config } }) => {
     console.log("Export Record action received");
@@ -142,6 +161,16 @@ const handlers = {
     console.log("Open Suitelet action received");
     return window.getSuiteletUrl(modules, { script, deployment });
   },
+  OPEN_DEPLOYMENT_SUITELET: async ({
+    modules,
+    payload: { script, deployment }
+  }) => {
+    console.log("Open Deployment Suitelet action received", {
+      script,
+      deployment
+    });
+    return window.getSuiteletUrl(modules, { script, deployment });
+  },
   LOGS: async ({
     modules,
     payload: { startDate, endDate, scriptIds, deploymentIds, scriptTypes }
@@ -163,14 +192,44 @@ const handlers = {
     console.log("Root Folders action received");
     return window.getRootFolders(modules);
   },
-  CREATE_FOLDER: async ({ modules, payload: { name, parentFolder } }) => {
+  CREATE_FOLDER: async ({
+    modules,
+    payload: { name, parentFolder },
+    csrfToken
+  }) => {
     console.log("Create Folder action received");
-    const csrfToken = document.querySelector('input[name="_csrf"]')?.value;
+
     return await window.createFolder(modules, {
       folderName: name,
       parentFolderId: parentFolder,
       csrfToken
     });
+  },
+  UPLOAD_FILE: async ({
+    modules,
+    payload: { fileName, fileContent, folderId },
+    csrfToken
+  }) => {
+    console.log("Upload File action received", { fileName, folderId });
+
+    return await window.uploadFile(modules, {
+      fileName,
+      fileContent,
+      folderId: folderId ?? -15,
+      csrfToken
+    });
+  },
+  CREATE_SCRIPT: async ({
+    modules,
+    payload: { name, scriptId, fileId, scriptType, description, apiVersion },
+    csrfToken
+  }) => {
+    console.log("Create Script action received", { name, scriptId, fileId, scriptType });
+    return await window.createScriptRecord(
+      modules,
+      { name, scriptId, fileId, scriptType, description, apiVersion },
+      csrfToken
+    );
   },
   GET_ALL_RECORD_TYPES: async ({ modules }) => {
     console.log("Get All Record Types action received");
@@ -183,5 +242,21 @@ const handlers = {
         resolve({ pong: true, delay });
       }, delay);
     });
+  },
+  FETCH_SUITEQL_TABLES: async () => {
+    console.log("Fetch SuiteQL Tables action received");
+    return window.fetchSuiteQLTables();
+  },
+  FETCH_SUITEQL_TABLE_DETAIL: async ({ payload: { tableName } }) => {
+    console.log("Fetch SuiteQL Table Detail action received:", tableName);
+    return window.fetchSuiteQLTableDetail(tableName);
+  },
+  RUN_SUITEQL_QUERY: async ({ modules, payload: { sql, limit } }) => {
+    console.log("Run SuiteQL Query action received", { limit });
+    return window.runSuiteQLQuery(modules, sql, limit ?? 1000);
+  },
+  GET_SUITEQL_COUNT: async ({ modules, payload: { sql } }) => {
+    console.log("Get SuiteQL Count action received");
+    return window.getSuiteQLCount(modules, sql);
   }
 };

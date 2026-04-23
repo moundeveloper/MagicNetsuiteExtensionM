@@ -6,5 +6,6 @@ export const INJECTABLE_SCRIPTS = [
   "netsuiteApi/logs.js",
   "netsuiteApi/mediaItems.js",
   "netsuiteApi/advancedPdfTemplates.js",
+  "netsuiteApi/suiteQL.js",
   "netsuiteApi/netsuiteApi.js"
 ];

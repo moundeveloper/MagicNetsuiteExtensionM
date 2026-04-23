@@ -1,9 +1,9 @@
 window.getAdvancedPDFTemplates = async (N) => {
   const { query } = N;
-  const sql = `
+
+  let sql = `
 SELECT
     CustomRecordType.name as customRecordType,
-    CustomTransactionType.name as customTransactionType,
     AdvancedPdfTemplate.id,
     AdvancedPdfTemplate.inactive,
     AdvancedPdfTemplate.name,
@@ -16,13 +16,42 @@ SELECT
 FROM AdvancedPdfTemplate
 LEFT JOIN CustomRecordType
     ON AdvancedPdfTemplate.customrecordtype = CustomRecordType.internalid
-LEFT JOIN CustomTransactionType
-    ON AdvancedPdfTemplate.customtransactiontype = CustomTransactionType.id
 WHERE AdvancedPdfTemplate.scriptId NOT LIKE 'STDTMPL%'
 `;
 
-  const queryConfig = { query: sql };
-  const resultSet = await query.runSuiteQL.promise(queryConfig);
+  let resultSet;
+  let hasCustomTransactionType = false;
+
+  // Try query with CustomTransactionType first, fall back if not available
+  const sqlWithCTT = sql
+    .replace(
+      "AdvancedPdfTemplate.tranType,",
+      `AdvancedPdfTemplate.tranType,
+    CustomTransactionType.name as customTransactionType,`
+    )
+    .replace(
+      "WHERE",
+      `LEFT JOIN CustomTransactionType
+    ON AdvancedPdfTemplate.customtransactiontype = CustomTransactionType.id
+WHERE`
+    );
+
+  try {
+    const queryConfig = { query: sqlWithCTT };
+    resultSet = await query.runSuiteQL.promise(queryConfig);
+    hasCustomTransactionType = true;
+  } catch (error) {
+    if (
+      error.message?.includes("CustomTransactionType") ||
+      error.message?.includes("was not found")
+    ) {
+      const queryConfig = { query: sql };
+      resultSet = await query.runSuiteQL.promise(queryConfig);
+      hasCustomTransactionType = false;
+    } else {
+      throw error;
+    }
+  }
 
   const results = resultSet.asMappedResults();
 
@@ -89,84 +118,109 @@ const getTemplateContent = async ({
   transactionType,
   customRecordType = null,
   savedSearch = null,
-  version = null
+  version = null,
+  maxRetries = 3,
+  retryDelayMs = 1000
 }) => {
-  // Construct URL with parameters
-  const baseUrl = window.location.origin;
-  const url = new URL(
-    `${baseUrl}/app/common/custom/advancedprint/pdftemplate.nl`
-  );
-  url.searchParams.set("id", templateId);
-  url.searchParams.set("nl", "F");
-  url.searchParams.set("pt", printType);
+  const fetchTemplate = async () => {
+    const baseUrl = window.location.origin;
+    const url = new URL(
+      `${baseUrl}/app/common/custom/advancedprint/pdftemplate.nl`
+    );
+    url.searchParams.set("id", templateId);
+    url.searchParams.set("nl", "F");
+    url.searchParams.set("pt", printType);
 
-  if (printType === "CUSTOMRECORD") {
-    url.searchParams.set("tt", "Custom");
-  } else {
-    url.searchParams.set("tt", transactionType);
+    if (printType === "CUSTOMRECORD") {
+      url.searchParams.set("tt", "Custom");
+    } else {
+      url.searchParams.set("tt", transactionType);
+    }
+
+    url.searchParams.set("source", "T");
+
+    if (customRecordType) url.searchParams.set("rt", customRecordType);
+
+    url.searchParams.set("e", "T");
+    url.searchParams.set("sc", "-90");
+    if (version) url.searchParams.set("version", version);
+
+    if (savedSearch) url.searchParams.set("savedsearchid", savedSearch);
+
+    console.log("url.searchParams", {
+      templateId,
+      printType,
+      transactionType,
+      customRecordType,
+      savedSearch,
+      version
+    });
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": "it-IT,it;q=0.6",
+        "sec-ch-ua":
+          '"Not:A-Brand";v="99", "Brave";v="145", "Chromium":v="145"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-user": "?1",
+        "sec-gpc": "1",
+        "upgrade-insecure-requests": "1"
+      },
+      referrer: `${baseUrl}/app/common/custom/pdftemplates.nl`,
+      method: "GET",
+      credentials: "include"
+    });
+
+    const htmlText = await response.text();
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, "text/html");
+
+    const versionSpan = doc.querySelector("#pdftemplate-version-number");
+    const currentVersion = versionSpan
+      ? parseInt(versionSpan.textContent.trim(), 10)
+      : 0;
+
+    const textarea = doc.querySelector('textarea#template[name="template"]');
+    const templateContent = textarea ? textarea.value : null;
+
+    return { templateContent, currentVersion };
+  };
+
+  let lastError;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const result = await fetchTemplate();
+      if (result.templateContent != null) {
+        return result;
+      }
+      console.warn(
+        `Template content empty for ${templateId}, retry ${attempt + 1}/${maxRetries}`
+      );
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `Fetch template error: ${error.message}, retry ${attempt + 1}/${maxRetries}`
+      );
+    }
+
+    if (attempt < maxRetries - 1) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryDelayMs * (attempt + 1))
+      );
+    }
   }
 
-  url.searchParams.set("source", "T");
-
-  if (customRecordType) url.searchParams.set("rt", customRecordType);
-
-  url.searchParams.set("e", "T");
-  url.searchParams.set("sc", "-90");
-  if (version) url.searchParams.set("version", version);
-
-  if (savedSearch) url.searchParams.set("savedsearchid", savedSearch);
-
-  console.log("url.searchParams", {
-    templateId,
-    printType,
-    transactionType,
-    customRecordType,
-    savedSearch,
-    version
-  });
-
-  // Perform the GET request
-  const response = await fetch(url.toString(), {
-    headers: {
-      accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "accept-language": "it-IT,it;q=0.6",
-      "sec-ch-ua": '"Not:A-Brand";v="99", "Brave";v="145", "Chromium";v="145"',
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": '"Windows"',
-      "sec-fetch-dest": "document",
-      "sec-fetch-mode": "navigate",
-      "sec-fetch-site": "same-origin",
-      "sec-fetch-user": "?1",
-      "sec-gpc": "1",
-      "upgrade-insecure-requests": "1"
-    },
-    referrer: `${baseUrl}/app/common/custom/pdftemplates.nl`,
-    method: "GET",
-    credentials: "include"
-  });
-
-  // Get the HTML text
-  const htmlText = await response.text();
-
-  // Parse the HTML
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlText, "text/html");
-
-  // Get version number
-  const versionSpan = doc.querySelector("#pdftemplate-version-number");
-  const currentVersion = versionSpan
-    ? parseInt(versionSpan.textContent.trim(), 10)
-    : 0;
-
-  // Get the textarea with id and name "template"
-  const textarea = doc.querySelector('textarea#template[name="template"]');
-  const templateContent = textarea ? textarea.value : null;
-
-  return {
-    templateContent,
-    currentVersion
-  };
+  throw (
+    lastError ||
+    new Error(`Failed to fetch template content after ${maxRetries} retries`)
+  );
 };
 
 const getPdfTemplateLinks = async () => {
@@ -218,6 +272,102 @@ const getPdfTemplateLinks = async () => {
 
 window.savePdfTemplate = async (N, data) => {
   return updatePdfTemplate(data);
+};
+
+window.previewPdfTemplate = async (
+  N,
+  {
+    templateId,
+    tranType,
+    printType,
+    recordType,
+    savedSearch,
+    templateScriptId,
+    template
+  }
+) => {
+  // TODO: Implement preview functionality
+  console.log("Preview function called with data:", {
+    templateId,
+    tranType,
+    printType,
+    recordType,
+    savedSearch,
+    templateScriptId,
+    template
+  });
+
+  if (printType === "CUSTOMRECORD") {
+    tranType = "Custom";
+  }
+
+  if (!tranType) {
+    console.error("Missing tranType");
+    return;
+  }
+
+  const baseUrl = window.location.origin;
+  const url = `${baseUrl}/app/common/custom/advancedprint/pdftemplate.nl?id=${templateId}&nl=F&tt=${tranType}&pt=${printType}&source=T&savedsearchid=${savedSearch || "-1"}&rt=&e=T&sc=-90`;
+  const body = new URLSearchParams({
+    action: "PREVIEW",
+    templateId,
+    displaySource: "T",
+    tranType,
+    printType: printType,
+    recordType: recordType || "",
+    createdFromCompId: "NL",
+    createdFromId: printType === "SEARCH" ? "0" : "2",
+    createdFromVersion: printType === "SEARCH" ? "3" : "6",
+    preferred: "F",
+    inactive: "F",
+    description: "F",
+    savedSearchId: savedSearch || "-1",
+    returnToSavedSearchDef: "F",
+    showAppIdField: "F",
+    scriptId:
+      "_" + templateScriptId.toLowerCase().split("_").slice(1).join("_"),
+    orientation: "p",
+    size: "Letter",
+    top: 0,
+    right: 0,
+    bottom: 0.5,
+    left: 0,
+    size: "in",
+    template: template
+  });
+
+  // Fetch the PDF preview
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      "sec-ch-ua": '"Not:A-Brand";v="99", "Brave";v="145", "Chromium";v="145"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+      "sec-gpc": "1",
+      "upgrade-insecure-requests": "1"
+    },
+    body,
+    mode: "cors",
+    credentials: "include",
+    referrer: url
+  });
+
+  // Convert to PDF and show in popup
+  const pdfData = await response.arrayBuffer();
+  const pdfBlob = new Blob([pdfData], { type: "application/pdf" });
+  const pdfUrl = URL.createObjectURL(pdfBlob);
+
+  console.log("PDF URL:", pdfUrl);
+
+  return pdfUrl;
 };
 
 /**
