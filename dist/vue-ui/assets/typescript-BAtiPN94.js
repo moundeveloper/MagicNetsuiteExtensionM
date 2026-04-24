@@ -1,1 +1,0 @@
-import{n as e,t}from"./typescript-gh0EcTYP.js";export{t as conf,e as language};

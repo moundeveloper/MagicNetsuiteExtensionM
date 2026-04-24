@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-UX5_zfCd.js";export{t as conf,e as language};
