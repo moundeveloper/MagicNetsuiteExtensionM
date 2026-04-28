@@ -18,7 +18,9 @@ WHERE
 
 const getCompId = () => {
   try {
-    const match = window.location.hostname.match(/(\d{7,})/);
+    const match = window.location.hostname.match(
+      /^([^.]+)\.app\.netsuite\.com$/
+    );
 
     if (!match) return "";
 
