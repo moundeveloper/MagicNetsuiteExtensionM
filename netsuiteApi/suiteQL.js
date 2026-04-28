@@ -19,7 +19,10 @@ WHERE
 const getCompId = () => {
   try {
     const match = window.location.hostname.match(/(\d{7,})/);
-    return match ? match[1] : "";
+
+    if (!match) return "";
+
+    return match[1].replace(/-/g, "_").toUpperCase();
   } catch {
     return "";
   }
