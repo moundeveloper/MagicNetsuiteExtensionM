@@ -13,6 +13,7 @@ WHERE
    OR LOWER(s.description) LIKE '%suiteql%')
   AND d.isdeployed = 'T'
   AND d.status = 'RELEASED'
+  AND s.apiversion = 2.1
 `;
 
 const getCompId = () => {
@@ -35,7 +36,7 @@ const discoverSuiteletScript = async (N) => {
     const result = await query.runSuiteQL.promise({
       query: SUITELET_DISCOVERY_QUERY
     });
-    
+
     const rows = result.asMappedResults();
     if (rows && rows.length > 0) {
       const first = rows[0];
@@ -56,7 +57,9 @@ const runSuiteQLViaScriptlet = async (N, sql, limit, returnTotals) => {
   if (!scriptInfo) {
     throw new Error("Failed to discover active SuiteQL suitelet script");
   }
-  console.log(`[runSuiteQLViaScriptlet] Using script ${scriptInfo.scriptId}, deploy ${scriptInfo.deployId}`);
+  console.log(
+    `[runSuiteQLViaScriptlet] Using script ${scriptInfo.scriptId}, deploy ${scriptInfo.deployId}`
+  );
 
   const url = buildScriptletUrl(scriptInfo.scriptId, scriptInfo.deployId);
   const requestPayload = {
@@ -89,7 +92,7 @@ const runSuiteQLViaScriptlet = async (N, sql, limit, returnTotals) => {
     throw new Error(data.error);
   }
 
-  const results = data.results ?? [];
+  const results = data.records ?? [];
   return {
     results,
     totalCount: data.totalCount ?? results.length
@@ -101,16 +104,19 @@ const runSuiteQLViaScriptlet = async (N, sql, limit, returnTotals) => {
  * Uses the NetSuite Record Catalog endpoint
  */
 window.fetchSuiteQLTables = async () => {
-  const url = '/app/recordscatalog/rcendpoint.nl?action=getRecordTypes&data=' +
-    encodeURI(JSON.stringify({
-      structureType: 'FLAT'
-    }));
+  const url =
+    "/app/recordscatalog/rcendpoint.nl?action=getRecordTypes&data=" +
+    encodeURI(
+      JSON.stringify({
+        structureType: "FLAT"
+      })
+    );
 
   const response = await fetch(url, {
-    method: 'GET',
-    credentials: 'same-origin',
+    method: "GET",
+    credentials: "same-origin",
     headers: {
-      'Content-Type': 'application/json'
+      "Content-Type": "application/json"
     }
   });
 
@@ -119,7 +125,7 @@ window.fetchSuiteQLTables = async () => {
   }
 
   const data = await response.json();
-  console.log('Record Types Result:', data);
+  console.log("Record Types Result:", data);
   return data;
 };
 
@@ -128,17 +134,20 @@ window.fetchSuiteQLTables = async () => {
  * @param {string} tableName - The script ID / table name (e.g. 'customer')
  */
 window.fetchSuiteQLTableDetail = async (tableName) => {
-  const url = '/app/recordscatalog/rcendpoint.nl?action=getRecordTypeDetail&data=' +
-    encodeURI(JSON.stringify({
-      scriptId: tableName,
-      detailType: 'SS_ANAL'
-    }));
+  const url =
+    "/app/recordscatalog/rcendpoint.nl?action=getRecordTypeDetail&data=" +
+    encodeURI(
+      JSON.stringify({
+        scriptId: tableName,
+        detailType: "SS_ANAL"
+      })
+    );
 
   const response = await fetch(url, {
-    method: 'GET',
-    credentials: 'same-origin',
+    method: "GET",
+    credentials: "same-origin",
     headers: {
-      'Content-Type': 'application/json'
+      "Content-Type": "application/json"
     }
   });
 
@@ -147,7 +156,7 @@ window.fetchSuiteQLTableDetail = async (tableName) => {
   }
 
   const data = await response.json();
-  console.log('Table Detail Result:', data);
+  console.log("Table Detail Result:", data);
   return data;
 };
 
@@ -160,10 +169,14 @@ window.fetchSuiteQLTableDetail = async (tableName) => {
  */
 window.runSuiteQLQuery = async (N, sql, limit) => {
   const { query } = N;
-  const effectiveLimit = (limit === null || limit === undefined) ? Infinity : limit;
+  const effectiveLimit =
+    limit === null || limit === undefined ? Infinity : limit;
 
   try {
-    const pagedData = await query.runSuiteQLPaged.promise({ query: sql, pageSize: 1000 });
+    const pagedData = await query.runSuiteQLPaged.promise({
+      query: sql,
+      pageSize: 1000
+    });
     const totalCount = pagedData.count;
 
     const results = [];
@@ -175,9 +188,18 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
       results.push(...rows);
     }
 
-    return { results: results.slice(0, effectiveLimit === Infinity ? undefined : effectiveLimit), totalCount };
+    return {
+      results: results.slice(
+        0,
+        effectiveLimit === Infinity ? undefined : effectiveLimit
+      ),
+      totalCount
+    };
   } catch (primaryErr) {
-    console.warn("[runSuiteQLQuery] N/query API failed, trying suitelet fallback:", primaryErr);
+    console.warn(
+      "[runSuiteQLQuery] N/query API failed, trying suitelet fallback:",
+      primaryErr
+    );
     const returnTotals = effectiveLimit !== Infinity;
     return runSuiteQLViaScriptlet(N, sql, limit ?? 1000, returnTotals);
   }
@@ -192,10 +214,16 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
 window.getSuiteQLCount = async (N, sql) => {
   try {
     const { query } = N;
-    const pagedData = await query.runSuiteQLPaged.promise({ query: sql, pageSize: 5 });
+    const pagedData = await query.runSuiteQLPaged.promise({
+      query: sql,
+      pageSize: 5
+    });
     return pagedData.count;
   } catch (primaryErr) {
-    console.warn("[getSuiteQLCount] N/query API failed, trying suitelet fallback:", primaryErr);
+    console.warn(
+      "[getSuiteQLCount] N/query API failed, trying suitelet fallback:",
+      primaryErr
+    );
     const result = await runSuiteQLViaScriptlet(N, sql, 5, true);
     return result.totalCount;
   }
