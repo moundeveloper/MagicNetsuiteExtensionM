@@ -484,14 +484,14 @@ let activeTabId = null;
 
 /* MCP SERVER */
 // background.js — Chrome Extension Service Worker
-// Connects to ALL host.js instances across ports 9700–9720 simultaneously,
+// Connects to ALL magiNetsuiteMCPServer.js instances across ports 9700–9720 simultaneously,
 // so multiple AI harnesses can each have their own MCP server and all receive
 // extension responses in parallel.
 const PORT_RANGE_START = 9700;
 const PORT_RANGE_END = 9720;
 const MCP_RECONNECT_ALARM = "mcp-reconnect";
 
-// Map of port → WebSocket for every active host.js connection.
+// Map of port → WebSocket for every active magiNetsuiteMCPServer.js connection.
 // Replacing the old single `ws` variable is the core fix: previously only
 // the first port found was connected, leaving any additional host instances
 // without an extension socket and causing "Extension not connected" errors.
