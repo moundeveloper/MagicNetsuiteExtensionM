@@ -117,6 +117,65 @@ const handlers = {
       ];
     }
   },
+  RUN_QUICK_SCRIPT_SERVER: async ({
+    modules,
+    payload: { code, userId },
+    csrfToken
+  }) => {
+    console.log("Run Quick Script Server action received", { userId });
+
+    return window.runQuickScriptServer(modules, { code, userId }, csrfToken);
+
+    try {
+      const N = modules;
+      const { query, url } = N;
+
+      // Step 1: Get or create Magic folder
+      const { folderId } = await window.getOrCreateMagicFolder(N);
+      console.log("[RUN_QUICK_SCRIPT_SERVER] Folder ID:", folderId);
+
+      if (!folderId) {
+        throw new Error("Failed to get or create Magic folder");
+      }
+
+      // Step 2: Get or create handler module
+      const handlerInfo = await window.getOrCreateHandlerModule(N, folderId);
+      console.log("[RUN_QUICK_SCRIPT_SERVER] Handler module:", handlerInfo);
+
+      // Step 3: Get or create suitelet
+      const suiteletInfo = await window.getOrCreateSuitelet(
+        N,
+        folderId,
+        handlerInfo.scriptRecordId
+      );
+      console.log("[RUN_QUICK_SCRIPT_SERVER] Suitelet:", suiteletInfo);
+
+      // Step 4: Update user handler
+      await window.updateUserHandler(N, folderId, userId, code);
+      console.log("[RUN_QUICK_SCRIPT_SERVER] User handler updated");
+
+      // Step 5: Execute server script
+      const result = await window.executeServerScript(
+        N,
+        SUITELET_SCRIPT_ID,
+        suiteletInfo.deploymentId,
+        userId
+      );
+
+      console.log("[RUN_QUICK_SCRIPT_SERVER] Execution result:", result);
+      return result;
+    } catch (err) {
+      console.error("[RUN_QUICK_SCRIPT_SERVER] Error:", err);
+      return { error: err.message };
+    }
+  },
+  CHECK_SERVER_COMPONENTS: async ({ modules, payload, csrfToken }) => {
+    return window.checkMagicNetsuiteComponents(modules, {}, csrfToken);
+  },
+  REMOVE_SERVER_COMPONENTS: async ({ modules, payload, csrfToken }) => {
+    console.log("Remove Server Components action received");
+    return await window.removeMagicNetsuiteComponents(modules, {}, csrfToken);
+  },
   SCRIPTS_DEPLOYED: async ({ modules, payload: { recordType } }) => {
     console.log("Scripts Deployed action received");
     return window.getDeployedScriptFiles(modules, { recordType });
@@ -224,7 +283,12 @@ const handlers = {
     payload: { name, scriptId, fileId, scriptType, description, apiVersion },
     csrfToken
   }) => {
-    console.log("Create Script action received", { name, scriptId, fileId, scriptType });
+    console.log("Create Script action received", {
+      name,
+      scriptId,
+      fileId,
+      scriptType
+    });
     return await window.createScriptRecord(
       modules,
       { name, scriptId, fileId, scriptType, description, apiVersion },
@@ -258,5 +322,95 @@ const handlers = {
   GET_SUITEQL_COUNT: async ({ modules, payload: { sql } }) => {
     console.log("Get SuiteQL Count action received");
     return window.getSuiteQLCount(modules, sql);
+  },
+  FETCH_ACCOUNTS: async () => {
+    console.log("Fetch Accounts action received");
+    try {
+      // Extract account ID from current domain (e.g., "1964539" from "1964539.app.netsuite.com")
+      const getCurrentAccountIdFromDomain = () => {
+        const hostname = window.location.hostname;
+        const parts = hostname.split(".");
+        // Expected format: [accountId].app.netsuite.com
+        if (parts.length >= 4 && parts[1] === "app" && parts[2] === "netsuite" && parts[3] === "com") {
+          return parts[0];
+        }
+        return parts[0]; // Fallback to first segment
+      };
+      const accountId = getCurrentAccountIdFromDomain();
+      const url = `https://${accountId}.app.netsuite.com/app/login/secure/myroles/myroles.nl?whence=`;
+      const response = await fetch(url, {
+        headers: {
+          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "accept-language": "it-IT,it;q=0.6",
+          "cache-control": "max-age=0",
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-site": "same-origin",
+          "upgrade-insecure-requests": "1"
+        },
+        credentials: "include"
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const scripts = doc.querySelectorAll("script");
+      for (const script of scripts) {
+        const content = script.textContent;
+        if (!content.includes("allAccounts")) continue;
+        try {
+          const data = JSON.parse(content);
+          const findContainer = (obj) => {
+            if (!obj || typeof obj !== "object") return null;
+            for (const key of Object.keys(obj)) {
+              if (key.trim() === "allAccounts" && Array.isArray(obj[key])) return obj;
+            }
+            for (const key of Object.keys(obj)) {
+              const result = findContainer(obj[key]);
+              if (result) return result;
+            }
+            return null;
+          };
+          const container = findContainer(data);
+          if (!container) continue;
+          const getVal = (obj, key) => obj[key] || obj[` ${key}`] || obj[`  ${key}`];
+
+          const currentAccount = container["account"] || container[" account"];
+          const allAccounts = getVal(container, "allAccounts") || [];
+          const allRoles = getVal(container, "allRoles") || [];
+          const accounts = [];
+          // Add current account first
+          if (currentAccount) {
+            accounts.push({
+              id: (getVal(currentAccount, "accountId") || "").trim(),
+              name: (getVal(currentAccount, "accountName") || "").trim(),
+              type: (getVal(currentAccount, "accountType") || "").trim(),
+              isCurrent: true
+            });
+          }
+          // Add all other accounts
+          allAccounts.forEach((acc) => {
+            accounts.push({
+              id: (getVal(acc, "accountId") || "").trim(),
+              name: (getVal(acc, "accountName") || "").trim(),
+              type: (getVal(acc, "accountType") || "").trim(),
+              isCurrent: false
+            });
+          });
+          return {
+            accounts,
+            roles: allRoles.map((r) => ({
+              id: r?.entityRoleId?.rol || r?.["entityRoleId"]?.["rol"],
+              name: (getVal(r, "roleName") || "").trim()
+            }))
+          };
+        } catch (e) {
+          // JSON parse failed for this script tag, continue
+        }
+      }
+      return { accounts: [], roles: [] };
+    } catch (error) {
+      console.error("Fetch accounts failed:", error);
+      return { accounts: [], roles: [], error: error.message };
+    }
   }
 };

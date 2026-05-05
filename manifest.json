@@ -50,6 +50,7 @@
         "netsuiteApi/scripts.js",
         "netsuiteApi/suiteQL.js",
         "netsuiteApi/netsuiteApi.js",
+        "netsuiteApi/serverScriptManager.js",
         "netsuiteApi/content.js",
         "netsuiteApi/customRecords.js",
         "netsuiteApi/sandboxCode.js",
@@ -65,7 +66,8 @@
         "content/utils/*.js",
         "content/ui/**/*.js",
         "content/keyboard/*.js",
-        "content/modules/*.js"
+        "content/modules/*.js",
+        "globalUtils.js"
       ],
       "matches": ["<all_urls>"]
     }
@@ -90,7 +92,9 @@
     "declarativeNetRequest",
     "*://*.netsuite.com/*",
     "downloads",
-    "debugger"
+    "debugger",
+    "nativeMessaging",
+    "alarms"
   ],
   "declarative_net_request": {
     "rule_resources": [

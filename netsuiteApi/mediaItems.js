@@ -10,6 +10,7 @@ window.getRootFolders = async ({ query }) => {
     .asMappedResults();
   return rootFolders;
 };
+
 window.createFolder = async ({}, { folderName, parentFolderId, csrfToken }) => {
   const baseUrl =
     "https://1964539.app.netsuite.com/app/common/media/mediaitemfolder.nl";
@@ -288,3 +289,268 @@ function extractFileIdFromHtml(html, fileName) {
 
   return null;
 }
+
+window.deleteNetsuiteFile = async (N, { fileId, folderId }) => {
+  const { csrfToken, accountId } = window.getNetsiteParams();
+
+  const url = `https://${accountId}.app.netsuite.com/app/common/media/mediaitem.nl`;
+
+  const fields = {
+    delete_media: "Delete",
+    folder: folderId,
+    description: "",
+    _multibtnstate_: "",
+    selectedtab: "",
+    nsapiPI: "",
+    nsapiSR: "",
+    nsapiVF: "",
+    nsapiFC: "",
+    nsapiPS: "",
+    nsapiVI: "",
+    nsapiVD: "",
+    nsapiPD: "",
+    nsapiVL: "",
+    nsapiRC: "",
+    nsapiLI: "",
+    nsapiLC: "",
+    nsapiCT: String(Date.now()),
+    nsbrowserenv: "istop=T",
+    type: "filecabinet",
+    id: fileId,
+    externalid: "",
+    customwhence: "",
+    entryformquerystring: `id=${fileId}&e=T`,
+    _csrf: csrfToken,
+    uploadrectype: "filecabinet",
+    package: "",
+    oldfolder: folderId,
+    caption: "",
+    storedisplaythumbnail: "",
+    sitedescription: "",
+    featureddescription: "",
+    submitted: "",
+    formdisplayview: "NONE",
+    _button: "",
+    sitecategoryfields:
+      "website\x01category_display\x01category\x01isdefault\x01categorydescription",
+    sitecategoryflags: "1\x018\x011\x010\x010",
+    sitecategoryfieldsets: "\x01\x01\x01\x01",
+    sitecategorytypes: "select\x01text\x01slaveselect\x01checkbox\x01text",
+    sitecategoryorigtypes: "\x01\x01\x01\x01",
+    sitecategoryparents:
+      "\x01sitecategory.website\x01sitecategory.website\x01\x01sitecategory.category",
+    sitecategorylabels:
+      "Site\x01Site Category\x01\x01Preferred Category\x01Description",
+    sitecategorydata: "",
+    nextsitecategoryidx: "1",
+    sitecategoryvalid: "T",
+    usernotesloaded: "F",
+    usernotesdotted: "F",
+    systemnotesloaded: "F",
+    systemnotesdotted: "F"
+  };
+
+  // Must use FormData to match original multipart/form-data encoding
+  const formData = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    formData.append(key, value);
+  }
+  // Empty file field (required by original request)
+  formData.append("mediafile", new Blob([]), "");
+
+  const { status } = await fetch(url, {
+    method: "POST",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      priority: "u=0, i",
+      "sec-ch-ua": '"Brave";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "sec-gpc": "1",
+      "upgrade-insecure-requests": "1"
+      // Note: content-type is intentionally omitted — the browser sets it
+      // automatically with the correct multipart boundary when using FormData
+    },
+    referrer: `${url}?id=${fileId}&e=T`,
+    body: formData
+  });
+
+  return status === 200 ? "success" : `failed (${status})`;
+};
+
+window.deleteFolder = async ({ record }, { folderId }) => {
+  record.delete({ id: folderId, type: record.Type.FOLDER });
+};
+
+window.getFilesContent = async ({ query, url }, { fileIds }) => {
+  console.log("getFilesContent - File IDs:", fileIds);
+
+  if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+    return [];
+  }
+
+  try {
+    const placeholders = fileIds.map(() => "?").join(", ");
+
+    const sql = `
+    SELECT
+        id,
+        url
+    FROM
+        file
+    WHERE
+        id IN (${placeholders})
+    `;
+
+    const queryConfig = {
+      query: sql,
+      params: fileIds
+    };
+
+    const resultSet = await query.runSuiteQL.promise(queryConfig);
+    const results = resultSet.asMappedResults();
+
+    console.log(`Found ${results.length} files for IDs: ${fileIds.join(", ")}`);
+
+    const domain = url.resolveDomain({
+      hostType: url.HostType.APPLICATION
+    });
+
+    const fetchPromises = results.map(
+      async ({ id: fileId, url: partialFileUrl }) => {
+        const fileUrl = `https://${domain}${partialFileUrl}`;
+        try {
+          const response = await fetch(fileUrl);
+          if (!response.ok) {
+            throw new Error(
+              `Failed to fetch ${fileId}: ${response.statusText}`
+            );
+          }
+          const body = await response.text();
+          console.log(`Fetched ${fileId} successfully.`);
+          return {
+            id: fileId,
+            fileContent: body
+          };
+        } catch (err) {
+          console.error(err);
+          return {
+            id: fileId,
+            fileContent: null
+          };
+        }
+      }
+    );
+
+    const fetchedResults = await Promise.all(fetchPromises);
+
+    console.log(
+      `Fetched ${
+        fetchedResults.filter((f) => f.fileContent).length
+      } script files successfully.`
+    );
+
+    return fetchedResults;
+  } catch (error) {
+    console.error("getScriptFiles error:", error);
+    return [];
+  }
+};
+
+window.updateNetsuiteFileContent = async (
+  N,
+  {
+    fileId,
+    fileContent,
+    fileName,
+    folderId,
+    mediaType = "JAVASCRIPT",
+    target = "filesize",
+    syntaxHighlighting = "T",
+    emlNkey = "1964539~56~3~N"
+  }
+) => {
+  const { csrfToken, accountId } = window.getNetsiteParams();
+
+  const url = `https://${accountId}.app.netsuite.com/app/common/record/edittextmediaitem.nl?l=T&l=T`;
+
+  const body = {
+    submitter: "Save",
+    mCharData: fileContent,
+    _eml_nkey_: emlNkey,
+    _multibtnstate_: "",
+    selectedtab: "",
+    l: "T",
+    nsapiPI: "",
+    nsapiSR: "",
+    nsapiVF: "",
+    nsapiFC: "",
+    nsapiPS: "",
+    nsapiVI: "",
+    nsapiVD: "",
+    nsapiPD: "",
+    nsapiVL: "",
+    nsapiRC: "",
+    nsapiLI: "",
+    nsapiLC: "",
+    nsapiCT: String(Date.now()),
+    nsbrowserenv: "istop=T",
+    type: "textmediaitem",
+    id: fileId,
+    externalid: "",
+    whence: "",
+    customwhence: "",
+    entryformquerystring: `id=${fileId}&e=T&l=T&target=${target}&syntaxHighlighting=${syntaxHighlighting}`,
+    _csrf: csrfToken,
+    target,
+    sname: fileName,
+    folder: folderId,
+    mediaType,
+    submitted: "T",
+    formdisplayview: "NONE",
+    _button: ""
+  };
+
+  const { status } = await fetch(url, {
+    method: "POST",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      priority: "u=0, i",
+      "sec-ch-ua": '"Brave";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "sec-gpc": "1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer: `https://${accountId}.app.netsuite.com/app/common/record/edittextmediaitem.nl?id=${fileId}&e=T&l=T&target=${target}&syntaxHighlighting=${syntaxHighlighting}`,
+    body: new URLSearchParams(body).toString()
+  });
+
+  const result = status === 200 ? "success" : `failed (${status})`;
+
+  console.log("updateNetsuiteFileContent - Result:", result);
+
+  return {
+    fileId,
+    isUpdated: status === 200
+  };
+};
