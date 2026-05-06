@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-JD0-z51G.js";export{t as conf,e as language};
