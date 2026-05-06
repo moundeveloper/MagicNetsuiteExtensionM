@@ -552,8 +552,9 @@ async function mcpConnect() {
   chrome.alarms.create(MCP_RECONNECT_ALARM, { periodInMinutes: 0.083 });
 }
 
-function mcpDisconnect() {
-  chrome.alarms.clear(MCP_RECONNECT_ALARM);
+async function mcpDisconnect() {
+  // Await the clear so the alarm cannot fire one final time due to a race
+  await chrome.alarms.clear(MCP_RECONNECT_ALARM);
 
   for (const [, sock] of connections) {
     try { sock.close(); } catch {}
@@ -823,7 +824,14 @@ async function handleRequest({ requestId, method, params }) {
 
     return { requestId, success: true, result };
   } catch (err) {
-    return { requestId, success: false, error: err.message };
+    // Handle non-Error throws (plain objects, strings) that have no .message
+    const msg =
+      err instanceof Error
+        ? err.message
+        : typeof err === "string"
+        ? err
+        : JSON.stringify(err);
+    return { requestId, success: false, error: msg };
   }
 }
 
@@ -879,7 +887,13 @@ async function handleSuiteQLTool(toolName, args) {
   });
 
   if (!response || response.status === "error") {
-    throw new Error(response?.message || "Failed to execute SuiteQL tool");
+    // response.message can be an object (e.g. a NetSuite error payload) — serialize it
+    const rawMsg = response?.message;
+    const errMsg =
+      rawMsg
+        ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+        : "Failed to execute SuiteQL tool";
+    throw new Error(errMsg);
   }
 
   // Process response based on tool

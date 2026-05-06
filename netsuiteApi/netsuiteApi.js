@@ -51,7 +51,24 @@ window.addEventListener("message", async (event) => {
     sendToExtension({ requestId, status: "ok", message: result });
   } catch (err) {
     console.log("Error:", err);
-    sendToExtension({ requestId, status: "error", message: err.message });
+    // Safely extract a string message from any thrown value.
+    // NetSuite SuiteScript errors can have .message as an object or be
+    // thrown as a plain object — both produce "[object Object]" if coerced
+    // directly via new Error() or string concatenation.
+    let errMsg;
+    if (typeof err === "string") {
+      errMsg = err;
+    } else if (err && typeof err.message !== "undefined") {
+      errMsg =
+        typeof err.message === "string"
+          ? err.message
+          : JSON.stringify(err.message);
+    } else if (err) {
+      errMsg = JSON.stringify(err);
+    } else {
+      errMsg = "Unknown error";
+    }
+    sendToExtension({ requestId, status: "error", message: errMsg });
   }
 });
 

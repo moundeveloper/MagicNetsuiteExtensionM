@@ -94,7 +94,15 @@ const runSuiteQLViaScriptlet = async (N, sql, limit, returnTotals) => {
   const data = await response.json();
 
   if (data.error) {
-    throw new Error(data.error);
+    // data.error from NetSuite's suitelet response is often an object like
+    // { code: "SSS_QUERY_PARSE_ERROR", message: "..." } — coercing it directly
+    // with new Error(obj) produces the unhelpful "Error: [object Object]".
+    const rawErr = data.error;
+    const errMsg =
+      typeof rawErr === "string"
+        ? rawErr
+        : rawErr.message || rawErr.code || rawErr.type || JSON.stringify(rawErr);
+    throw new Error(errMsg);
   }
 
   const results = data.records ?? [];
