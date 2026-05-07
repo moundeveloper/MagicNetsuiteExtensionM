@@ -17,7 +17,7 @@ window.createFolder = async ({}, { folderName, parentFolderId }) => {
 
   const timestamp = Date.now();
   const cmid = `${timestamp}_${Math.floor(Math.random() * 100000)}`;
-  const csrfToken = window.getCSRFToken();
+  const csrfToken = getCSRFToken();
 
   // Build body as raw string to match exact encoding
   const body = `submitnew=Save+%26+New&name=${encodeURIComponent(
