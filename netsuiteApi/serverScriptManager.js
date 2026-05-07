@@ -104,6 +104,38 @@ window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
     suiteletDeployed
   } = await window.checkMagicNetsuiteComponents({ query });
 
+  // Auto-clean residual handler file left over from an older version
+  if (handlerFileExists) {
+    try {
+      const [{ id: hFolderId } = {}] = (
+        await query.runSuiteQL.promise({
+          query: `SELECT id FROM MediaItemFolder WHERE name = ? AND parent = -15`,
+          params: [CONFIG.FOLDER_NAME]
+        })
+      ).asMappedResults();
+
+      if (hFolderId) {
+        const [{ id: hFileId } = {}] = (
+          await query.runSuiteQL.promise({
+            query: `SELECT id FROM file WHERE folder = ? AND name = ?`,
+            params: [hFolderId, CONFIG.HANDLER_FILE]
+          })
+        ).asMappedResults();
+
+        if (hFileId) {
+          await window.deleteNetsuiteFile(
+            N,
+            { fileId: hFileId, folderId: hFolderId },
+            csrfToken
+          );
+          console.log("[runQuickScriptServer] Residual handler file removed.");
+        }
+      }
+    } catch (cleanupErr) {
+      console.warn("[runQuickScriptServer] Handler file cleanup failed (non-fatal):", cleanupErr);
+    }
+  }
+
   const mutation = {};
 
   // -------------------------
@@ -362,10 +394,16 @@ window.executeServerScript = async (
  * @returns {Promise<{removed: string[]}>}
  */
 window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
-  try {
-    const { query, record } = N;
-    const removed = [];
+  const { query } = N;
+  /** @type {{name: string, status: 'removed'|'skipped'|'error', error?: string}[]} */
+  const steps = [];
 
+  const addStep = (name, status, error) => {
+    steps.push(error !== undefined ? { name, status, error } : { name, status });
+  };
+
+  // ── Script ──────────────────────────────────────────────────────────────
+  try {
     const [{ id: scriptId } = {}] = (
       await query.runSuiteQL.promise({
         query: `SELECT id FROM script WHERE scriptid = ?`,
@@ -384,17 +422,31 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
         },
         csrfToken
       );
-
-      removed.push("Script");
+      addStep("Suitelet Script", "removed");
+    } else {
+      addStep("Suitelet Script", "skipped");
     }
+  } catch (err) {
+    addStep("Suitelet Script", "error", String(err));
+  }
 
-    const [{ id: folderId } = {}] = (
+  // ── Folder + files ───────────────────────────────────────────────────────
+  let folderId;
+  try {
+    const [{ id } = {}] = (
       await query.runSuiteQL.promise({
         query: `SELECT id FROM MediaItemFolder WHERE name = ? AND parent = -15`,
         params: [CONFIG.FOLDER_NAME]
       })
     ).asMappedResults();
+    folderId = id;
+  } catch (err) {
+    addStep("Folder Lookup", "error", String(err));
+    return { steps };
+  }
 
+  // ── Server file ──────────────────────────────────────────────────────────
+  try {
     const [{ id: serverFileId } = {}] = (
       await query.runSuiteQL.promise({
         query: `SELECT id FROM file WHERE folder = ? AND name = ?`,
@@ -402,24 +454,22 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
       })
     ).asMappedResults();
 
-    console.log("removing", {
-      folderId,
-      serverFileId
-    });
-
     if (serverFileId) {
       await window.deleteNetsuiteFile(
         N,
-        {
-          fileId: serverFileId,
-          folderId
-        },
+        { fileId: serverFileId, folderId },
         csrfToken
       );
-
-      removed.push("Server File");
+      addStep("Server File", "removed");
+    } else {
+      addStep("Server File", "skipped");
     }
+  } catch (err) {
+    addStep("Server File", "error", String(err));
+  }
 
+  // ── Handler file (legacy cleanup) ────────────────────────────────────────
+  try {
     const [{ id: handlerFileId } = {}] = (
       await query.runSuiteQL.promise({
         query: `SELECT id FROM file WHERE folder = ? AND name = ?`,
@@ -430,24 +480,30 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
     if (handlerFileId) {
       await window.deleteNetsuiteFile(
         N,
-        {
-          fileId: handlerFileId,
-          folderId
-        },
+        { fileId: handlerFileId, folderId },
         csrfToken
       );
-
-      removed.push("Handler File");
+      addStep("Handler File (legacy)", "removed");
+    } else {
+      addStep("Handler File (legacy)", "skipped");
     }
+  } catch (err) {
+    addStep("Handler File (legacy)", "error", String(err));
+  }
 
+  // ── Folder ───────────────────────────────────────────────────────────────
+  try {
     if (folderId) {
-      window.deleteFolder(N, { folderId });
-
-      removed.push("Folder");
+      await window.deleteFolder(N, { folderId });
+      addStep("Scripts Folder", "removed");
+    } else {
+      addStep("Scripts Folder", "skipped");
     }
+  } catch (err) {
+    addStep("Scripts Folder", "error", String(err));
+  }
 
-    return removed;
-  } catch (error) {}
+  return { steps };
 };
 
 // ─── Helper Functions ──────────────────────────────────────────────────────────
@@ -462,8 +518,16 @@ function buildSuiteletContent() {
  * so multiple users can run scripts concurrently without conflicts.
  */
 define(
-  ['N/record', 'N/search', 'N/query', 'N/log', 'N/file', 'N/url', 'N/runtime'],
-  (record, search, query, log, file, url, runtime) => {
+  [
+    'N/record', 'N/search', 'N/query', 'N/log', 'N/file', 'N/url', 'N/runtime',
+    'N/format', 'N/email', 'N/render', 'N/task', 'N/workflow',
+    'N/https', 'N/http', 'N/encode', 'N/error', 'N/xml',
+    'N/currency', 'N/transaction', 'N/redirect'
+  ],
+  (record, search, query, log, file, url, runtime,
+   format, email, render, task, workflow,
+   https, http, encode, nsError, xml,
+   currency, transaction, redirect) => {
 
   var __serialize = function(a) {
     try { return typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a); }
@@ -484,11 +548,19 @@ define(
       // NetSuite modules injected as named parameters — identical to the
       // previous handler-file approach but without requiring a file write.
       var userFn = new Function(
-        'record', 'search', 'query', 'log', 'file', 'url', 'runtime', 'context', 'console',
+        'record', 'search', 'query', 'log', 'file', 'url', 'runtime',
+        'format', 'email', 'render', 'task', 'workflow',
+        'https', 'http', 'encode', 'error', 'xml',
+        'currency', 'transaction', 'redirect',
+        'context', 'console',
         code
       );
       __result = userFn(
-        N.record, N.search, N.query, N.log, N.file, N.url, N.runtime, N.context, fakeConsole
+        N.record, N.search, N.query, N.log, N.file, N.url, N.runtime,
+        N.format, N.email, N.render, N.task, N.workflow,
+        N.https, N.http, N.encode, N.nsError, N.xml,
+        N.currency, N.transaction, N.redirect,
+        N.context, fakeConsole
       );
     } catch (__err) {
       __logs.push({ type: 'error', values: [__err.message || String(__err)] });
@@ -515,7 +587,13 @@ define(
         return;
       }
 
-      var N = { record: record, search: search, query: query, log: log, file: file, url: url, runtime: runtime, context: context };
+      var N = {
+        record: record, search: search, query: query, log: log, file: file, url: url, runtime: runtime,
+        format: format, email: email, render: render, task: task, workflow: workflow,
+        https: https, http: http, encode: encode, nsError: nsError, xml: xml,
+        currency: currency, transaction: transaction, redirect: redirect,
+        context: context
+      };
       var handlerResult = executeUserCode(code, N);
       context.response.setHeader({ name: 'Content-Type', value: 'application/json' });
       context.response.write(JSON.stringify({
