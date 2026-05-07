@@ -77,7 +77,6 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
 
     // Final result
     const allReady =
-      handlerFileExists &&
       serverFileExists &&
       suiteletScriptExists &&
       suiteletDeployed;
@@ -139,33 +138,14 @@ window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
   // -------------------------
   const files = (
     await query.runSuiteQL.promise({
-      query: `SELECT id, name FROM file WHERE folder = ? AND name IN (?, ?)`,
-      params: [mutation.folderId, CONFIG.HANDLER_FILE, CONFIG.SERVER_FILE]
+      query: `SELECT id, name FROM file WHERE folder = ? AND name = ?`,
+      params: [mutation.folderId, CONFIG.SERVER_FILE]
     })
   ).asMappedResults();
 
   console.log("files", files);
 
   const fileMap = new Map(files.map((f) => [f.name, f.id]));
-
-  // Handler file
-  if (!handlerFileExists) {
-    const initialContent = buildHandlerModuleContent({});
-    const handlerResult = await window.uploadFile(N, {
-      fileName: CONFIG.HANDLER_FILE,
-      fileContent: initialContent,
-      folderId: mutation.folderId,
-      csrfToken
-    });
-
-    const handlerFileId = handlerResult.uploaded?.[0]?.fileId;
-
-    mutation.handlerFileId = handlerFileId;
-  } else {
-    mutation.handlerFileId = fileMap.get(CONFIG.HANDLER_FILE);
-  }
-
-  console.log("mutation", mutation);
 
   // Server file
   if (!serverFileExists) {
@@ -248,35 +228,19 @@ window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
     mutation.deployUrl = deployUrl;
   }
 
-  // generate handler for user
-  const isUpdated = await updateUserHandler(
-    N,
-    mutation.handlerFileId,
-    mutation.folderId,
+  // Execute server-side script — code is passed directly in the POST body
+  const execResult = await window.executeServerScript(N, {
+    suiteletScriptId: "customscript" + CONFIG.SUITELET_SCRIPT_ID,
+    deploymentId: "customdeploy" + CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
     userId,
     code
-  );
-
-  if (isUpdated) {
-    // Execute server-side script and wait for the response
-    const execResult = await window.executeServerScript(N, {
-      suiteletScriptId: "customscript" + CONFIG.SUITELET_SCRIPT_ID,
-      deploymentId: "customdeploy" + CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
-      userId
-    });
-
-    return {
-      success: true,
-      logs: execResult?.logs || [],
-      result: execResult?.result,
-      error: execResult?.error,
-      mutation
-    };
-  }
+  });
 
   return {
-    success: false,
-    logs: [{ type: "error", values: ["Failed to update user handler — script was not executed"] }],
+    success: true,
+    logs: execResult?.logs || [],
+    result: execResult?.result,
+    error: execResult?.error,
     mutation
   };
 };
@@ -348,101 +312,6 @@ window.createScriptDeployment = async (
 };
 
 /**
- * Update handler module with user-specific handler
- * @param {object} N - NetSuite modules
- * @param {string} folderId - Folder containing the handler file
- * @param {string} userId - Extension user ID
- * @param {string} code - User's script code
- * @returns {Promise<boolean>}
- */
-const updateUserHandler = async (N, handlerFileId, folderId, userId, code) => {
-  try {
-    const [{ fileContent } = {}] = await window.getFilesContent(N, {
-      fileIds: [handlerFileId]
-    });
-
-    let currentContent = fileContent;
-    const newHandler = buildUserHandler(userId, code);
-    // newHandler should be the full "userId: () => { ... }" string
-
-    // Find ALL occurrences of this handler key and remove duplicates
-    const escapedId = userId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const startRegex = new RegExp(
-      `${escapedId}\\s*:\\s*(?:async\\s*)?\\(?\\)?\\s*=>\\s*{`
-    );
-
-    const findHandlerBounds = (content, fromIndex = 0) => {
-      const match = startRegex.exec(content.slice(fromIndex));
-      if (!match) return null;
-
-      const startIndex = fromIndex + match.index;
-      const braceOpenIndex = content.indexOf(
-        "{",
-        startIndex + match[0].length - 1
-      );
-
-      let depth = 0;
-      let endIndex = -1;
-      for (let i = braceOpenIndex; i < content.length; i++) {
-        if (content[i] === "{") depth++;
-        else if (content[i] === "}") {
-          depth--;
-          if (depth === 0) {
-            endIndex = i;
-            break;
-          }
-        }
-      }
-
-      if (endIndex === -1) return null;
-
-      // Also consume trailing comma + whitespace if present
-      let afterEnd = endIndex + 1;
-      while (afterEnd < content.length && /[\s,]/.test(content[afterEnd])) {
-        afterEnd++;
-      }
-
-      return { startIndex, endIndex: afterEnd - 1 };
-    };
-
-    // Remove ALL existing occurrences of this handler
-    let bounds;
-    while ((bounds = findHandlerBounds(currentContent)) !== null) {
-      currentContent =
-        currentContent.slice(0, bounds.startIndex) +
-        currentContent.slice(bounds.endIndex + 1);
-    }
-
-    // Now insert the single clean version before the comment marker
-    if (
-      currentContent.includes("// User handlers will be added here dynamically")
-    ) {
-      currentContent = currentContent.replace(
-        /(\s*\/\/ User handlers will be added here dynamically)/,
-        `\n    ${newHandler},\n$1`
-      );
-    } else {
-      // Fallback: insert into return block
-      currentContent = currentContent.replace(
-        /(const handlers\s*=\s*\(\)\s*=>\s*{\s*return\s*{)/,
-        `$1\n    ${newHandler},`
-      );
-    }
-
-    const { isUpdated } = await window.updateNetsuiteFileContent(N, {
-      fileId: handlerFileId,
-      fileContent: currentContent,
-      fileName: CONFIG.HANDLER_FILE,
-      folderId
-    });
-
-    return isUpdated;
-  } catch (error) {
-    console.error("[updateUserHandler]", error);
-    throw error;
-  }
-};
-/**
  * Execute server-side script via suitelet
  * @param {object} N - NetSuite modules
  * @param {string} suiteletScriptId - Suitelet script ID
@@ -452,7 +321,7 @@ const updateUserHandler = async (N, handlerFileId, folderId, userId, code) => {
  */
 window.executeServerScript = async (
   N,
-  { suiteletScriptId, deploymentId, userId, deployUrl }
+  { suiteletScriptId, deploymentId, userId, deployUrl, code }
 ) => {
   const { url } = N;
 
@@ -474,7 +343,7 @@ window.executeServerScript = async (
       headers: {
         "content-type": "application/x-www-form-urlencoded"
       },
-      body: `action=${userId}`,
+      body: `action=${encodeURIComponent(userId)}&code=${encodeURIComponent(code)}`,
       credentials: "include"
     });
 
@@ -590,58 +459,71 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
 
 // ─── Helper Functions ──────────────────────────────────────────────────────────
 
-function buildHandlerModuleContent(initialHandlers = {}) {
-  return `/**
- * @NApiVersion 2.1
- * @NModuleScope SameAccount
- */
-define([], () => {
-  // N is injected by the suitelet so every handler has access to record, search, etc.
-  const handlers = (N) => {
-    return {
-      // User handlers will be added here dynamically
-      ${Object.entries(initialHandlers)
-        .map(([key, code]) => `${key}: function(__N) {\n        ${code}\n      }`)
-        .join(",\n      ")}
-    };
-  };
-
-  return { handlers };
-});`;
-}
-
 function buildSuiteletContent() {
   return `/**
  * @NApiVersion 2.1
  * @NScriptType Suitelet
+ *
+ * Executes user-submitted code passed in the POST body.
+ * No shared handler file is used — each request is self-contained,
+ * so multiple users can run scripts concurrently without conflicts.
  */
 define(
-  ['N/record', 'N/search', 'N/query', 'N/log', 'N/file', 'N/url', 'N/runtime', './${CONFIG.HANDLER_FILE}'],
-  (record, search, query, log, file, url, runtime, handlerModule) => {
+  ['N/record', 'N/search', 'N/query', 'N/log', 'N/file', 'N/url', 'N/runtime'],
+  (record, search, query, log, file, url, runtime) => {
 
-  const onRequest = (context) => {
+  var __serialize = function(a) {
+    try { return typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a); }
+    catch(e) { return String(a); }
+  };
+
+  var executeUserCode = function(code, N) {
+    var __logs = [];
+    var fakeConsole = {
+      log:   function() { __logs.push({ type: 'log',   values: Array.prototype.slice.call(arguments).map(__serialize) }); },
+      warn:  function() { __logs.push({ type: 'warn',  values: Array.prototype.slice.call(arguments).map(__serialize) }); },
+      error: function() { __logs.push({ type: 'error', values: Array.prototype.slice.call(arguments).map(__serialize) }); },
+      info:  function() { __logs.push({ type: 'log',   values: Array.prototype.slice.call(arguments).map(__serialize) }); }
+    };
+    var __result;
+    try {
+      // Build a function from the user's code string and execute it with
+      // NetSuite modules injected as named parameters — identical to the
+      // previous handler-file approach but without requiring a file write.
+      var userFn = new Function(
+        'record', 'search', 'query', 'log', 'file', 'url', 'runtime', 'context', 'console',
+        code
+      );
+      __result = userFn(
+        N.record, N.search, N.query, N.log, N.file, N.url, N.runtime, N.context, fakeConsole
+      );
+    } catch (__err) {
+      __logs.push({ type: 'error', values: [__err.message || String(__err)] });
+    }
+    return { logs: __logs, result: __result };
+  };
+
+  var onRequest = function(context) {
     try {
       if (context.request.method !== 'POST') {
         context.response.write(JSON.stringify({ success: false, error: 'Only POST requests are supported', logs: [] }));
         return;
       }
 
-      const action = context.request.parameters.action;
+      var action = context.request.parameters.action;
       if (!action) {
         context.response.write(JSON.stringify({ success: false, error: 'Missing action parameter', logs: [] }));
         return;
       }
 
-      const N = { record: record, search: search, query: query, log: log, file: file, url: url, runtime: runtime, context: context };
-      const handlers = handlerModule.handlers(N);
-      const handlerFn = handlers[action];
-
-      if (!handlerFn) {
-        context.response.write(JSON.stringify({ success: false, error: 'No handler registered for action: ' + action, logs: [] }));
+      var code = context.request.parameters.code;
+      if (!code) {
+        context.response.write(JSON.stringify({ success: false, error: 'Missing code parameter — please re-run from the extension', logs: [] }));
         return;
       }
 
-      const handlerResult = handlerFn(N);
+      var N = { record: record, search: search, query: query, log: log, file: file, url: url, runtime: runtime, context: context };
+      var handlerResult = executeUserCode(code, N);
       context.response.setHeader({ name: 'Content-Type', value: 'application/json' });
       context.response.write(JSON.stringify({
         success: true,
@@ -659,33 +541,6 @@ define(
 
   return { onRequest };
 });`;
-}
-
-function buildUserHandler(userId, code) {
-  return `${userId}: function(__N) {
-    var __logs = [];
-    var __serialize = function(a) {
-      try { return typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a); }
-      catch(e) { return String(a); }
-    };
-    var console = {
-      log:   function() { __logs.push({ type: 'log',   values: Array.prototype.slice.call(arguments).map(__serialize) }); },
-      warn:  function() { __logs.push({ type: 'warn',  values: Array.prototype.slice.call(arguments).map(__serialize) }); },
-      error: function() { __logs.push({ type: 'error', values: Array.prototype.slice.call(arguments).map(__serialize) }); },
-      info:  function() { __logs.push({ type: 'log',   values: Array.prototype.slice.call(arguments).map(__serialize) }); }
-    };
-    var __result;
-    try {
-      // Destructure N so user code can reference record, search, etc. directly.
-      // The fake console shadows the global to capture all log calls.
-      __result = (function(record, search, query, log, file, url, runtime, context, console) {
-        ${code}
-      })(__N.record, __N.search, __N.query, __N.log, __N.file, __N.url, __N.runtime, __N.context, console);
-    } catch (__err) {
-      __logs.push({ type: 'error', values: [__err.message || String(__err)] });
-    }
-    return { logs: __logs, result: __result };
-  }`;
 }
 
 function extractDeploymentIdFromHtml(html) {
