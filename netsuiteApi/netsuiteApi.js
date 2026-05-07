@@ -348,7 +348,12 @@ const handlers = {
         const hostname = window.location.hostname;
         const parts = hostname.split(".");
         // Expected format: [accountId].app.netsuite.com
-        if (parts.length >= 4 && parts[1] === "app" && parts[2] === "netsuite" && parts[3] === "com") {
+        if (
+          parts.length >= 4 &&
+          parts[1] === "app" &&
+          parts[2] === "netsuite" &&
+          parts[3] === "com"
+        ) {
           return parts[0];
         }
         return parts[0]; // Fallback to first segment
@@ -357,7 +362,8 @@ const handlers = {
       const url = `https://${accountId}.app.netsuite.com/app/login/secure/myroles/myroles.nl?whence=`;
       const response = await fetch(url, {
         headers: {
-          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "accept-language": "it-IT,it;q=0.6",
           "cache-control": "max-age=0",
           "sec-fetch-dest": "document",
@@ -379,7 +385,8 @@ const handlers = {
           const findContainer = (obj) => {
             if (!obj || typeof obj !== "object") return null;
             for (const key of Object.keys(obj)) {
-              if (key.trim() === "allAccounts" && Array.isArray(obj[key])) return obj;
+              if (key.trim() === "allAccounts" && Array.isArray(obj[key]))
+                return obj;
             }
             for (const key of Object.keys(obj)) {
               const result = findContainer(obj[key]);
@@ -389,7 +396,8 @@ const handlers = {
           };
           const container = findContainer(data);
           if (!container) continue;
-          const getVal = (obj, key) => obj[key] || obj[` ${key}`] || obj[`  ${key}`];
+          const getVal = (obj, key) =>
+            obj[key] || obj[` ${key}`] || obj[`  ${key}`];
 
           const currentAccount = container["account"] || container[" account"];
           const allAccounts = getVal(container, "allAccounts") || [];

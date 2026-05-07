@@ -326,18 +326,22 @@ window.getSuiteletUrl = async (N, { script, deployment }) => {
   return suiteletUrl;
 };
 
-window.saveScriptlet = async ({
-  name,
-  scriptId,
-  scriptFile,
-  ownerId,
-  ownerName,
-  description = "",
-  apiVersion = "2.1",
-  scriptType = "SCRIPTLET",
-  domain,
-  csrf
-}) => {
+window.saveScriptlet = async (
+  { runtime },
+  {
+    name,
+    scriptId,
+    scriptFile,
+    ownerId,
+    ownerName,
+    description = "",
+    apiVersion = "2.1",
+    scriptType = "SCRIPTLET",
+    domain
+  }
+) => {
+  const { csrfToken, accountId } = getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
   const resolvedDomain = domain || window.location.host;
   const formEncode = (str) => encodeURIComponent(str).replace(/%20/g, "+");
   const encodedScriptType = encodeURIComponent(scriptType);
@@ -353,9 +357,9 @@ window.saveScriptlet = async ({
     .replace(/__APIVERSION__/g, formEncode(apiVersion))
     .replace(/__SCRIPTTYPE__/g, scriptType)
     .replace(/__ENCODEDSCRIPTTYPE__/g, encodedScriptType)
-    .replace(/__CSRF__/g, csrf)
+    .replace(/__CSRF__/g, csrfToken)
     .replace(/__NSAPICT__/g, Date.now().toString())
-    .replace(/__NKEY__/g, "1964539~56~3~N");
+    .replace(/__NKEY__/g, `${accountId}~${id}~${role}~N`);
 
   return fetch(`https://${resolvedDomain}/app/common/scripting/script.nl`, {
     method: "POST",
@@ -431,9 +435,9 @@ window.createScriptRecord = async (
     scriptType = "SCRIPTLET",
     description = "",
     apiVersion = "2.1"
-  },
-  csrfToken
+  }
 ) => {
+  const { csrfToken, accountId } = getNetsiteParams();
   const { url, runtime } = N;
 
   const domain = url.resolveDomain({ hostType: url.HostType.APPLICATION });
@@ -451,7 +455,7 @@ window.createScriptRecord = async (
     ownerId
   });
 
-  const response = await window.saveScriptlet({
+  const response = await window.saveScriptlet(N, {
     name,
     scriptId,
     scriptFile: String(fileId),
@@ -460,8 +464,7 @@ window.createScriptRecord = async (
     description,
     apiVersion,
     scriptType,
-    domain,
-    csrf: csrfToken
+    domain
   });
 
   if (!response.ok) {
@@ -527,9 +530,6 @@ window.createScriptRecord = async (
  * - `"ERROR"`
  * - `"EMERGENCY"`
  *
- * @param {string|number} [options.runAsRole="3"]
- * Internal ID of the role used to execute the script (e.g. `"3"` = Administrator).
- *
  * @param {string} csrfToken
  * NetSuite CSRF token (`_csrf`) required for authenticated POST requests.
  *
@@ -559,8 +559,7 @@ window.createScriptRecord = async (
  *     scriptInternalId: '123',
  *     title: 'My Script Deployment',
  *     status: 'RELEASED',
- *     logLevel: 'DEBUG',
- *     runAsRole: '3'
+ *     logLevel: 'DEBUG'
  *   },
  *   csrfToken
  * );
@@ -579,25 +578,19 @@ window.createScriptRecord = async (
  * @see https://system.netsuite.com/app/common/scripting/scriptrecord.nl
  */
 window.createScriptDeployRecord = async (
-  N,
+  { runtime },
   {
     name,
     scriptId,
     scriptInternalId,
     title,
     status = "RELEASED",
-    logLevel = "DEBUG",
-    runAsRole = "3"
-  },
-  csrfToken
+    logLevel = "DEBUG"
+  }
 ) => {
-  // Derive accountId from current URL: 1964539-sb1 → 1964539_SB1
-  const accountId = window.location.hostname
-    .split(".")[0]
-    .replace(/-/g, "_")
-    .toUpperCase();
+  const { csrfToken, accountId } = getNetsiteParams();
 
-  const _nlKey = `${accountId}~56~3~N`;
+  const { id, role } = runtime.getCurrentUser();
 
   const body = new URLSearchParams({
     submitter: "Save",
@@ -613,8 +606,8 @@ window.createScriptDeployRecord = async (
     inpt_loglevel: "Debug",
     loglevel: logLevel,
     inpt_runasrole: "Administrator",
-    runasrole: runAsRole,
-    _eml_nkey_: _nlKey,
+    runasrole: role,
+    _eml_nkey_: `${accountId}~${id}~${role}~N`,
     _multibtnstate_: "",
     selectedtab: "",
     nsapiPI: "",
@@ -793,19 +786,16 @@ function extractDeploymentIdFromHtml(html) {
 }
 
 window.deleteNetsuiteScript = async (
-  N,
+  { runtime },
   {
     scriptId,
     scriptName = "Magic Netsuite Server",
     apiVersion = "2.1",
     defaultFunction = "onRequest"
-  },
-  csrfToken
+  }
 ) => {
-  const accountId = window.location.hostname
-    .split(".")[0]
-    .replace(/-/g, "_")
-    .toUpperCase();
+  const { accountId, csrfToken } = getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
 
   const url = `https://${accountId}.app.netsuite.com/app/common/scripting/script.nl`;
 
@@ -814,7 +804,7 @@ window.deleteNetsuiteScript = async (
     scripttype: "SCRIPTLET",
     name: scriptName,
     apiversion: apiVersion,
-    _eml_nkey_: `${accountId}~56~3~N`,
+    _eml_nkey_: `${accountId}~${id}~${role}~N`,
     _multibtnstate_: "",
     selectedtab: "",
     nsapiPI: "",

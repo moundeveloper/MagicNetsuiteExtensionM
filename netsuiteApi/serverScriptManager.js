@@ -77,9 +77,7 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
 
     // Final result
     const allReady =
-      serverFileExists &&
-      suiteletScriptExists &&
-      suiteletDeployed;
+      serverFileExists && suiteletScriptExists && suiteletDeployed;
 
     return {
       folderExists: true,
@@ -211,19 +209,14 @@ window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
   // DEPLOYMENT
   // -------------------------
   if (!suiteletDeployed) {
-    const { deployUrl } = await window.createScriptDeployRecord(
-      N,
-      {
-        name: CONFIG.SUITELET_DEPLOYMENT_NAME,
-        scriptId: CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
-        scriptInternalId: mutation.scriptRecordId,
-        title: CONFIG.SUITELET_DEPLOYMENT_NAME,
-        status: "RELEASED",
-        logLevel: "DEBUG",
-        runAsRole: "3"
-      },
-      csrfToken
-    );
+    const { deployUrl } = await window.createScriptDeployRecord(N, {
+      name: CONFIG.SUITELET_DEPLOYMENT_NAME,
+      scriptId: CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
+      scriptInternalId: mutation.scriptRecordId,
+      title: CONFIG.SUITELET_DEPLOYMENT_NAME,
+      status: "RELEASED",
+      logLevel: "DEBUG"
+    });
 
     mutation.deployUrl = deployUrl;
   }

@@ -11,18 +11,18 @@ window.getRootFolders = async ({ query }) => {
   return rootFolders;
 };
 
-window.createFolder = async ({}, { folderName, parentFolderId }) => {
-  const baseUrl =
-    "https://1964539.app.netsuite.com/app/common/media/mediaitemfolder.nl";
+window.createFolder = async ({ runtime }, { folderName, parentFolderId }) => {
+  const { csrfToken, accountId } = getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
+  const baseUrl = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl`;
 
   const timestamp = Date.now();
   const cmid = `${timestamp}_${Math.floor(Math.random() * 100000)}`;
-  const csrfToken = getCSRFToken();
 
   // Build body as raw string to match exact encoding
   const body = `submitnew=Save+%26+New&name=${encodeURIComponent(
     folderName
-  )}&parent=${parentFolderId}&inpt_foldertype=Documents+and+Files&foldertype=DEFAULT&description=&inpt_class=+&class=&inpt_department=+&department=&inpt_location=+&location=&inpt_subsidiary=+&subsidiary=&inpt_group=+&group=&_eml_nkey_=1964539%7E36%7E3%7EN&_multibtnstate_=EDIT_MEDIAITEMFOLDER%3Asubmitter%3Asubmitnew&selectedtab=&nsapiPI=&nsapiSR=&nsapiVF=&nsapiFC=&nsapiPS=&nsapiVI=&nsapiVD=&nsapiPD=&nsapiVL=&nsapiRC=&nsapiLI=&nsapiLC=&nsapiCT=${timestamp}&nsbrowserenv=istop%3DT&type=filecabinet&id=&externalid=&whence=%2Fapp%2Fcommon%2Fmedia%2Fmediaitemfolders.nl%3Ffolder%3D${parentFolderId}%26cmid%3D${cmid}&customwhence=&entryformquerystring=parent%3D${parentFolderId}&_csrf=${encodeURIComponent(
+  )}&parent=${parentFolderId}&inpt_foldertype=Documents+and+Files&foldertype=DEFAULT&description=&inpt_class=+&class=&inpt_department=+&department=&inpt_location=+&location=&inpt_subsidiary=+&subsidiary=&inpt_group=+&group=&_eml_nkey_=${accountId}%7E${id}%7E${role}%7EN&_multibtnstate_=EDIT_MEDIAITEMFOLDER%3Asubmitter%3Asubmitnew&selectedtab=&nsapiPI=&nsapiSR=&nsapiVF=&nsapiFC=&nsapiPS=&nsapiVI=&nsapiVD=&nsapiPD=&nsapiVL=&nsapiRC=&nsapiLI=&nsapiLC=&nsapiCT=${timestamp}&nsbrowserenv=istop%3DT&type=filecabinet&id=&externalid=&whence=%2Fapp%2Fcommon%2Fmedia%2Fmediaitemfolders.nl%3Ffolder%3D${parentFolderId}%26cmid%3D${cmid}&customwhence=&entryformquerystring=parent%3D${parentFolderId}&_csrf=${encodeURIComponent(
     csrfToken
   )}&parentofparent=&owner=&submitted=T&formdisplayview=NONE&_button=&usernotesfields=id%01title%01note%01author%01notedate%01time%01notetype%01direction&usernotesflags=0%010%011%010%010%010%010%010&usernotesfieldsets=%01%01%01%01%01%01%01&usernotestypes=integer%01text%01textarea%01integer%01date%01timeofday%01select%01select&usernotesorigtypes=%01%01%01%01%01%01%01&usernotesparents=%01%01%01%01%01%01%01&usernoteslabels=%01Title%01Memo%01%01Date%01Time%01Type%01Direction&usernotesdata=&nextusernotesidx=1&usernotesvalid=T`;
 
@@ -41,7 +41,7 @@ window.createFolder = async ({}, { folderName, parentFolderId }) => {
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1"
       },
-      referrer: `https://1964539.app.netsuite.com/app/common/media/mediaitemfolder.nl?parent=${parentFolderId}`,
+      referrer: `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl?parent=${parentFolderId}`,
       body: body,
       credentials: "include",
       mode: "cors"
@@ -468,7 +468,7 @@ window.getFilesContent = async ({ query, url }, { fileIds }) => {
 };
 
 window.updateNetsuiteFileContent = async (
-  N,
+  { runtime },
   {
     fileId,
     fileContent,
@@ -476,18 +476,18 @@ window.updateNetsuiteFileContent = async (
     folderId,
     mediaType = "JAVASCRIPT",
     target = "filesize",
-    syntaxHighlighting = "T",
-    emlNkey = "1964539~56~3~N"
+    syntaxHighlighting = "T"
   }
 ) => {
   const { csrfToken, accountId } = window.getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
 
   const url = `https://${accountId}.app.netsuite.com/app/common/record/edittextmediaitem.nl?l=T&l=T`;
 
   const body = {
     submitter: "Save",
     mCharData: fileContent,
-    _eml_nkey_: emlNkey,
+    _eml_nkey_: `${accountId}~${id}~${role}~N`,
     _multibtnstate_: "",
     selectedtab: "",
     l: "T",
