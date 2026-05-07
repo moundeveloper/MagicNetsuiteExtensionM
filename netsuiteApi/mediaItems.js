@@ -11,12 +11,13 @@ window.getRootFolders = async ({ query }) => {
   return rootFolders;
 };
 
-window.createFolder = async ({}, { folderName, parentFolderId, csrfToken }) => {
+window.createFolder = async ({}, { folderName, parentFolderId }) => {
   const baseUrl =
     "https://1964539.app.netsuite.com/app/common/media/mediaitemfolder.nl";
 
   const timestamp = Date.now();
   const cmid = `${timestamp}_${Math.floor(Math.random() * 100000)}`;
+  const csrfToken = window.getCSRFToken();
 
   // Build body as raw string to match exact encoding
   const body = `submitnew=Save+%26+New&name=${encodeURIComponent(
