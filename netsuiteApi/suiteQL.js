@@ -35,7 +35,12 @@ const buildScriptletUrl = (scriptId, deployId) => {
   return `/app/site/hosting/scriptlet.nl?script=${scriptId}&deploy=${deployId}&compid=${compid}`;
 };
 
+let cachedScriptInfo = null;
+
 const discoverSuiteletScript = async (N) => {
+  // Return cached result if available
+  if (cachedScriptInfo) return cachedScriptInfo;
+
   try {
     const { query } = N;
     const result = await query.runSuiteQL.promise({
@@ -45,10 +50,11 @@ const discoverSuiteletScript = async (N) => {
     const rows = result.asMappedResults();
     if (rows && rows.length > 0) {
       const first = rows[0];
-      return {
+      cachedScriptInfo = {
         scriptId: first.id,
         deployId: first.deploy_id
       };
+      return cachedScriptInfo;
     }
     return null;
   } catch (err) {
@@ -184,6 +190,25 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
   const { query } = N;
   const effectiveLimit =
     limit === null || limit === undefined ? Infinity : limit;
+
+  // If governance is running low, skip the paged N/query path entirely and
+  // delegate to the suitelet, which runs under its own governance budget.
+  try {
+    const script = N.runtime.getCurrentScript();
+    if (script.getRemainingUsage() < 200) {
+      console.warn(
+        "[runSuiteQLQuery] Low governance (<200 units remaining), switching directly to suitelet fallback"
+      );
+      return runSuiteQLViaScriptlet(
+        N,
+        sql,
+        limit ?? 1000,
+        effectiveLimit !== Infinity
+      );
+    }
+  } catch {
+    // Not in a governance-tracked SuiteScript context — proceed normally
+  }
 
   try {
     const pagedData = await query.runSuiteQLPaged.promise({

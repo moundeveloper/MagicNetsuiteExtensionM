@@ -5,7 +5,6 @@
 
 const CONFIG = {
   FOLDER_NAME: "MagicNetsuiteScripts",
-  HANDLER_FILE: "magic_netsuite_handlers.js",
   SERVER_FILE: "magic_netsuite_server.js",
   scriptId: "customscript_magic_netsuite_server",
   SUITELET_SCRIPT_NAME: "Magic Netsuite Server",
@@ -29,7 +28,6 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
     if (!folder) {
       return {
         folderExists: false,
-        handlerFileExists: false,
         serverFileExists: false,
         suiteletScriptExists: false,
         suiteletDeployed: false,
@@ -39,17 +37,16 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
 
     const folderId = folder.id;
 
-    // 2. Check both files in one query
+    // 2. Check server file
     const files = (
       await query.runSuiteQL.promise({
-        query: `SELECT name FROM file WHERE folder = ? AND name IN (?, ?)`,
-        params: [folderId, CONFIG.HANDLER_FILE, CONFIG.SERVER_FILE]
+        query: `SELECT name FROM file WHERE folder = ? AND name = ?`,
+        params: [folderId, CONFIG.SERVER_FILE]
       })
     ).asMappedResults();
 
     const fileSet = new Set(files.map((f) => f.name));
 
-    const handlerFileExists = fileSet.has(CONFIG.HANDLER_FILE);
     const serverFileExists = fileSet.has(CONFIG.SERVER_FILE);
 
     // 3. Check script
@@ -81,7 +78,6 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
 
     return {
       folderExists: true,
-      handlerFileExists,
       serverFileExists,
       suiteletScriptExists,
       suiteletDeployed,
@@ -98,43 +94,10 @@ window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
 
   const {
     folderExists,
-    handlerFileExists,
     serverFileExists,
     suiteletScriptExists,
     suiteletDeployed
   } = await window.checkMagicNetsuiteComponents({ query });
-
-  // Auto-clean residual handler file left over from an older version
-  if (handlerFileExists) {
-    try {
-      const [{ id: hFolderId } = {}] = (
-        await query.runSuiteQL.promise({
-          query: `SELECT id FROM MediaItemFolder WHERE name = ? AND parent = -15`,
-          params: [CONFIG.FOLDER_NAME]
-        })
-      ).asMappedResults();
-
-      if (hFolderId) {
-        const [{ id: hFileId } = {}] = (
-          await query.runSuiteQL.promise({
-            query: `SELECT id FROM file WHERE folder = ? AND name = ?`,
-            params: [hFolderId, CONFIG.HANDLER_FILE]
-          })
-        ).asMappedResults();
-
-        if (hFileId) {
-          await window.deleteNetsuiteFile(
-            N,
-            { fileId: hFileId, folderId: hFolderId },
-            csrfToken
-          );
-          console.log("[runQuickScriptServer] Residual handler file removed.");
-        }
-      }
-    } catch (cleanupErr) {
-      console.warn("[runQuickScriptServer] Handler file cleanup failed (non-fatal):", cleanupErr);
-    }
-  }
 
   const mutation = {};
 
@@ -468,29 +431,6 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
     addStep("Server File", "error", String(err));
   }
 
-  // ── Handler file (legacy cleanup) ────────────────────────────────────────
-  try {
-    const [{ id: handlerFileId } = {}] = (
-      await query.runSuiteQL.promise({
-        query: `SELECT id FROM file WHERE folder = ? AND name = ?`,
-        params: [folderId, CONFIG.HANDLER_FILE]
-      })
-    ).asMappedResults();
-
-    if (handlerFileId) {
-      await window.deleteNetsuiteFile(
-        N,
-        { fileId: handlerFileId, folderId },
-        csrfToken
-      );
-      addStep("Handler File (legacy)", "removed");
-    } else {
-      addStep("Handler File (legacy)", "skipped");
-    }
-  } catch (err) {
-    addStep("Handler File (legacy)", "error", String(err));
-  }
-
   // ── Folder ───────────────────────────────────────────────────────────────
   try {
     if (folderId) {
@@ -514,7 +454,7 @@ function buildSuiteletContent() {
  * @NScriptType Suitelet
  *
  * Executes user-submitted code passed in the POST body.
- * No shared handler file is used — each request is self-contained,
+ * Each request is self-contained via new Function(),
  * so multiple users can run scripts concurrently without conflicts.
  */
 define(
@@ -545,8 +485,7 @@ define(
     var __result;
     try {
       // Build a function from the user's code string and execute it with
-      // NetSuite modules injected as named parameters — identical to the
-      // previous handler-file approach but without requiring a file write.
+      // NetSuite modules injected as named parameters.
       var userFn = new Function(
         'record', 'search', 'query', 'log', 'file', 'url', 'runtime',
         'format', 'email', 'render', 'task', 'workflow',
@@ -594,12 +533,12 @@ define(
         currency: currency, transaction: transaction, redirect: redirect,
         context: context
       };
-      var handlerResult = executeUserCode(code, N);
+      var execResult = executeUserCode(code, N);
       context.response.setHeader({ name: 'Content-Type', value: 'application/json' });
       context.response.write(JSON.stringify({
         success: true,
-        logs: handlerResult.logs || [],
-        result: handlerResult.result
+        logs: execResult.logs || [],
+        result: execResult.result
       }));
     } catch (error) {
       context.response.write(JSON.stringify({

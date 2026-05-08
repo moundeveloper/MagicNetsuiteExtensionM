@@ -142,49 +142,6 @@ const handlers = {
     console.log("Run Quick Script Server action received", { userId });
 
     return window.runQuickScriptServer(modules, { code, userId }, csrfToken);
-
-    try {
-      const N = modules;
-      const { query, url } = N;
-
-      // Step 1: Get or create Magic folder
-      const { folderId } = await window.getOrCreateMagicFolder(N);
-      console.log("[RUN_QUICK_SCRIPT_SERVER] Folder ID:", folderId);
-
-      if (!folderId) {
-        throw new Error("Failed to get or create Magic folder");
-      }
-
-      // Step 2: Get or create handler module
-      const handlerInfo = await window.getOrCreateHandlerModule(N, folderId);
-      console.log("[RUN_QUICK_SCRIPT_SERVER] Handler module:", handlerInfo);
-
-      // Step 3: Get or create suitelet
-      const suiteletInfo = await window.getOrCreateSuitelet(
-        N,
-        folderId,
-        handlerInfo.scriptRecordId
-      );
-      console.log("[RUN_QUICK_SCRIPT_SERVER] Suitelet:", suiteletInfo);
-
-      // Step 4: Update user handler
-      await window.updateUserHandler(N, folderId, userId, code);
-      console.log("[RUN_QUICK_SCRIPT_SERVER] User handler updated");
-
-      // Step 5: Execute server script
-      const result = await window.executeServerScript(
-        N,
-        SUITELET_SCRIPT_ID,
-        suiteletInfo.deploymentId,
-        userId
-      );
-
-      console.log("[RUN_QUICK_SCRIPT_SERVER] Execution result:", result);
-      return result;
-    } catch (err) {
-      console.error("[RUN_QUICK_SCRIPT_SERVER] Error:", err);
-      return { error: err.message };
-    }
   },
   CHECK_SERVER_COMPONENTS: async ({ modules, payload, csrfToken }) => {
     return window.checkMagicNetsuiteComponents(modules, {}, csrfToken);
@@ -339,6 +296,55 @@ const handlers = {
   GET_SUITEQL_COUNT: async ({ modules, payload: { sql } }) => {
     console.log("Get SuiteQL Count action received");
     return window.getSuiteQLCount(modules, sql);
+  },
+  FETCH_FILE_CONTENT: async ({ payload: { fileUrl } }) => {
+    console.log("Fetch File Content action received", { fileUrl });
+    const fullUrl = window.location.origin + fileUrl;
+    const response = await fetch(fullUrl, { credentials: "include" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    const contentType = response.headers.get("content-type") || "";
+    const isText = /text|javascript|json|xml|css|html|svg|freemarker|csv/i.test(contentType);
+    if (isText) {
+      const text = await response.text();
+      return { content: text, contentType, binary: false };
+    }
+    // Binary files: return as base64 data URL
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+    const dataUrl = `data:${contentType};base64,${base64}`;
+    return { content: dataUrl, contentType, binary: true };
+  },
+  UPDATE_FILE_CONTENT: async ({
+    modules,
+    payload: { fileId, fileContent, fileName, folderId, mediaType }
+  }) => {
+    console.log("Update File Content action received", { fileId, fileName });
+    return window.updateNetsuiteFileContent(modules, {
+      fileId,
+      fileContent,
+      fileName,
+      folderId,
+      mediaType: mediaType || "JAVASCRIPT"
+    });
+  },
+  DELETE_FILE: async ({
+    modules,
+    payload: { fileId, folderId }
+  }) => {
+    console.log("Delete File action received", { fileId, folderId });
+    return await window.deleteNetsuiteFile(modules, { fileId, folderId });
+  },
+  DELETE_FOLDER: async ({
+    modules,
+    payload: { folderId }
+  }) => {
+    console.log("Delete Folder action received", { folderId });
+    return await window.deleteFolder(modules, { folderId });
   },
   FETCH_ACCOUNTS: async () => {
     console.log("Fetch Accounts action received");
