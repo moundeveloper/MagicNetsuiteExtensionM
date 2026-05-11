@@ -90,7 +90,7 @@ window.createFolder = async ({ runtime }, { folderName, parentFolderId }) => {
  */
 window.uploadFile = async (
   N,
-  { fileName, fileContent, folderId = -15, csrfToken }
+  { fileName, fileContent, fileContentBase64, mimeType, folderId = -15, csrfToken }
 ) => {
   const targetFolder = String(folderId);
 
@@ -150,7 +150,22 @@ window.uploadFile = async (
     }
   };
 
-  // ── Content mode: AI supplies file name + content string ──────────────────
+  // ── Base64 mode: binary or any file type supplied as base64 string ────────
+  if (fileName && fileContentBase64 !== undefined) {
+    const binaryStr = atob(fileContentBase64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+    const result = await postFile(blob, fileName);
+    return {
+      uploaded: result.ok ? [{ name: result.name, fileId: result.fileId }] : [],
+      errors: result.ok ? [] : [`${result.name}: ${result.error}`]
+    };
+  }
+
+  // ── Content mode: AI supplies file name + plain text content string ───────
   if (fileName && fileContent !== undefined) {
     const blob = new Blob([fileContent], { type: "text/plain" });
     const result = await postFile(blob, fileName);
@@ -467,6 +482,200 @@ window.getFilesContent = async ({ query, url }, { fileIds }) => {
   }
 };
 
+/**
+ * Rename a folder by POSTing to the NetSuite mediaitemfolder.nl edit endpoint.
+ * @param {{ runtime: object }} modules
+ * @param {{ folderId: number|string, newName: string, parentFolderId: number|string }} options
+ */
+window.editFolder = async ({ runtime }, { folderId, newName, parentFolderId }) => {
+  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
+  const baseUrl = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl`;
+  const timestamp = Date.now();
+
+  const body =
+    `submitnew=Save+%26+New` +
+    `&name=${encodeURIComponent(newName)}` +
+    `&parent=${parentFolderId}` +
+    `&inpt_foldertype=Documents+and+Files&foldertype=DEFAULT&description=` +
+    `&inpt_class=+&class=&inpt_department=+&department=&inpt_location=+&location=` +
+    `&inpt_subsidiary=+&subsidiary=&inpt_group=+&group=` +
+    `&_eml_nkey_=${accountId}%7E${id}%7E${role}%7EN` +
+    `&_multibtnstate_=` +
+    `&selectedtab=&nsapiPI=&nsapiSR=&nsapiVF=&nsapiFC=&nsapiPS=&nsapiVI=&nsapiVD=` +
+    `&nsapiPD=&nsapiVL=&nsapiRC=&nsapiLI=&nsapiLC=` +
+    `&nsapiCT=${timestamp}&nsbrowserenv=istop%3DT` +
+    `&type=filecabinet&id=${folderId}&externalid=` +
+    `&whence=%2Fapp%2Fcommon%2Fmedia%2Fmediaitemfolders.nl%3Ffolder%3D${parentFolderId}` +
+    `&customwhence=&entryformquerystring=id%3D${folderId}%26e%3DT` +
+    `&_csrf=${encodeURIComponent(csrfToken)}` +
+    `&parentofparent=&owner=${id}&submitted=T&formdisplayview=NONE&_button=` +
+    `&systemnotesloaded=F&systemnotesdotted=T`;
+
+  const response = await fetch(baseUrl, {
+    method: "POST",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer: `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl?id=${folderId}&e=T`,
+    body,
+    credentials: "include",
+    mode: "cors"
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP error renaming folder: ${response.status}`);
+  }
+
+  console.log("editFolder - success, folderId:", folderId, "newName:", newName);
+  return { folderId, renamed: true };
+};
+
+/**
+ * Rename any file type (text or binary) by POSTing to the NetSuite mediaitem.nl edit endpoint.
+ * This only changes the file name — the file content is untouched.
+ * @param {{ runtime: object }} modules
+ * @param {{ fileId: number|string, newName: string, folderId: number|string }} options
+ */
+window.editMediaItem = async ({ runtime }, { fileId, newName, folderId, filetype = "", filesize = 0 }) => {
+  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
+  const timestamp = Date.now();
+
+  // Must use multipart/form-data (FormData) — URL-encoded does not work for mediaitem.nl
+  const fd = new FormData();
+  fd.append("submitter", "Save");
+  fd.append("name", newName);
+  fd.append("filesize", String(filesize));
+  fd.append("folder_display", "");
+  fd.append("folder", String(folderId));
+  fd.append("description", "");
+  // Empty file input — required by the form
+  fd.append("mediafile", new Blob([], { type: "application/octet-stream" }), "");
+  // Field name uses asterisks, not underscores
+  fd.append("*eml_nkey*", `${accountId}~${id}~${role}~N`);
+  fd.append("*multibtnstate*", "");
+  fd.append("selectedtab", "");
+  fd.append("nsapiPI", "");
+  fd.append("nsapiSR", "");
+  fd.append("nsapiVF", "");
+  fd.append("nsapiFC", "");
+  fd.append("nsapiPS", "");
+  fd.append("nsapiVI", "");
+  fd.append("nsapiVD", "");
+  fd.append("nsapiPD", "");
+  fd.append("nsapiVL", "");
+  fd.append("nsapiRC", "");
+  fd.append("nsapiLI", "");
+  fd.append("nsapiLC", "");
+  fd.append("nsapiCT", String(timestamp));
+  fd.append("nsbrowserenv", "istop=T");
+  fd.append("type", "filecabinet");
+  fd.append("id", String(fileId));
+  fd.append("externalid", "");
+  fd.append("whence", "");
+  fd.append("customwhence", "");
+  fd.append("entryformquerystring", `id=${fileId}&e=T`);
+  fd.append("_csrf", csrfToken);
+  fd.append("filetype", filetype);
+  fd.append("createddate", "");
+  fd.append("lastmodifieddate", "");
+  fd.append("uploadrectype", "filecabinet");
+  fd.append("package", "");
+  fd.append("mediatypeiconurl", "");
+  fd.append("oldfolder", String(folderId));
+  fd.append("oldrootfolder", "-15");
+  fd.append("rootfolder", "-15");
+  fd.append("textfileencoding", "UTF-8");
+  fd.append("caption", "");
+  fd.append("storedisplaythumbnail", "");
+  fd.append("sitedescription", "");
+  fd.append("featureddescription", "");
+  fd.append("submitted", "T");
+  fd.append("formdisplayview", "NONE");
+  fd.append("_button", "");
+  fd.append("sitecategoryfields", "website\x01category_display\x01category\x01isdefault\x01categorydescription");
+  fd.append("sitecategoryflags", "1\x018\x011\x010\x010");
+  fd.append("sitecategoryfieldsets", "\x01\x01\x01\x01");
+  fd.append("sitecategorytypes", "select\x01text\x01slaveselect\x01checkbox\x01text");
+  fd.append("sitecategoryorigtypes", "\x01\x01\x01\x01");
+  fd.append("sitecategoryparents", "\x01sitecategory.website\x01sitecategory.website\x01\x01sitecategory.category");
+  fd.append("sitecategorylabels", "Site\x01Site Category\x01\x01Preferred Category\x01Description");
+  fd.append("sitecategorydata", "");
+  fd.append("nextsitecategoryidx", "1");
+  fd.append("sitecategoryvalid", "T");
+  fd.append("usernotesloaded", "F");
+  fd.append("usernotesdotted", "F");
+  fd.append("systemnotesloaded", "F");
+  fd.append("systemnotesdotted", "F");
+
+  // Do NOT set Content-Type header — the browser sets it automatically with the correct boundary
+  const response = await fetch(
+    `https://${accountId}.app.netsuite.com/app/common/media/mediaitem.nl`,
+    {
+      method: "POST",
+      headers: {
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": "it-IT,it;q=0.6",
+        "cache-control": "max-age=0",
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1"
+      },
+      referrer: `https://${accountId}.app.netsuite.com/app/common/media/mediaitem.nl?id=${fileId}&e=T`,
+      body: fd,
+      credentials: "include",
+      mode: "cors"
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`HTTP error renaming file: ${response.status}`);
+  }
+
+  console.log("editMediaItem - success, fileId:", fileId, "newName:", newName);
+  return { fileId, renamed: true };
+};
+
+/**
+ * Rename a text file by fetching its current content then re-saving with the new name.
+ * Only works for text media item types (edittextmediaitem.nl endpoint).
+ * @param {{ runtime: object }} modules
+ * @param {{ fileId: number|string, fileUrl: string, newName: string, folderId: number|string, mediaType?: string }} options
+ */
+window.renameNetsuiteFile = async (
+  { runtime },
+  { fileId, fileUrl, newName, folderId, mediaType = "JAVASCRIPT" }
+) => {
+  // Fetch current file content so we can preserve it while changing only the name
+  const fullUrl = window.location.origin + fileUrl;
+  const fetchResp = await fetch(fullUrl, { credentials: "include" });
+  if (!fetchResp.ok) {
+    throw new Error(`Failed to fetch file content for rename: HTTP ${fetchResp.status}`);
+  }
+  const content = await fetchResp.text();
+
+  return window.updateNetsuiteFileContent({ runtime }, {
+    fileId,
+    fileContent: content,
+    fileName: newName,
+    folderId,
+    mediaType
+  });
+};
+
 window.updateNetsuiteFileContent = async (
   { runtime },
   {
@@ -513,6 +722,7 @@ window.updateNetsuiteFileContent = async (
     entryformquerystring: `id=${fileId}&e=T&l=T&target=${target}&syntaxHighlighting=${syntaxHighlighting}`,
     _csrf: csrfToken,
     target,
+    name: fileName,
     sname: fileName,
     folder: folderId,
     mediaType,

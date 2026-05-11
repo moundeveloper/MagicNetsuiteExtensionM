@@ -240,7 +240,7 @@ const handlers = {
   },
   UPLOAD_FILE: async ({
     modules,
-    payload: { fileName, fileContent, folderId },
+    payload: { fileName, fileContent, fileContentBase64, mimeType, folderId },
     csrfToken
   }) => {
     console.log("Upload File action received", { fileName, folderId });
@@ -248,6 +248,8 @@ const handlers = {
     return await window.uploadFile(modules, {
       fileName,
       fileContent,
+      fileContentBase64,
+      mimeType,
       folderId: folderId ?? -15,
       csrfToken
     });
@@ -345,6 +347,20 @@ const handlers = {
   }) => {
     console.log("Delete Folder action received", { folderId });
     return await window.deleteFolder(modules, { folderId });
+  },
+  RENAME_FILE: async ({
+    modules,
+    payload: { fileId, newName, folderId, filetype, filesize }
+  }) => {
+    console.log("Rename File action received", { fileId, newName });
+    return await window.editMediaItem(modules, { fileId, newName, folderId, filetype, filesize });
+  },
+  RENAME_FOLDER: async ({
+    modules,
+    payload: { folderId, newName, parentFolderId }
+  }) => {
+    console.log("Rename Folder action received", { folderId, newName });
+    return await window.editFolder(modules, { folderId, newName, parentFolderId });
   },
   FETCH_ACCOUNTS: async () => {
     console.log("Fetch Accounts action received");

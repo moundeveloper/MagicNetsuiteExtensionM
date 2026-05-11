@@ -1,1 +1,0 @@
-import{n as e,t}from"./typescript-BrGp85kz.js";export{t as conf,e as language};
