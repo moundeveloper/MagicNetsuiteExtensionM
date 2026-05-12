@@ -90,7 +90,14 @@ window.createFolder = async ({ runtime }, { folderName, parentFolderId }) => {
  */
 window.uploadFile = async (
   N,
-  { fileName, fileContent, fileContentBase64, mimeType, folderId = -15, csrfToken }
+  {
+    fileName,
+    fileContent,
+    fileContentBase64,
+    mimeType,
+    folderId = -15,
+    csrfToken
+  }
 ) => {
   const targetFolder = String(folderId);
 
@@ -157,7 +164,9 @@ window.uploadFile = async (
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
-    const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+    const blob = new Blob([bytes], {
+      type: mimeType || "application/octet-stream"
+    });
     const result = await postFile(blob, fileName);
     return {
       uploaded: result.ok ? [{ name: result.name, fileId: result.fileId }] : [],
@@ -487,7 +496,10 @@ window.getFilesContent = async ({ query, url }, { fileIds }) => {
  * @param {{ runtime: object }} modules
  * @param {{ folderId: number|string, newName: string, parentFolderId: number|string }} options
  */
-window.editFolder = async ({ runtime }, { folderId, newName, parentFolderId }) => {
+window.editFolder = async (
+  { runtime },
+  { folderId, newName, parentFolderId }
+) => {
   const { csrfToken, accountId } = window.getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
   const baseUrl = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl`;
@@ -546,7 +558,10 @@ window.editFolder = async ({ runtime }, { folderId, newName, parentFolderId }) =
  * @param {{ runtime: object }} modules
  * @param {{ fileId: number|string, newName: string, folderId: number|string }} options
  */
-window.editMediaItem = async ({ runtime }, { fileId, newName, folderId, filetype = "", filesize = 0 }) => {
+window.editMediaItem = async (
+  { runtime },
+  { fileId, newName, folderId, filetype = "", filesize = 0 }
+) => {
   const { csrfToken, accountId } = window.getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
   const timestamp = Date.now();
@@ -560,7 +575,11 @@ window.editMediaItem = async ({ runtime }, { fileId, newName, folderId, filetype
   fd.append("folder", String(folderId));
   fd.append("description", "");
   // Empty file input — required by the form
-  fd.append("mediafile", new Blob([], { type: "application/octet-stream" }), "");
+  fd.append(
+    "mediafile",
+    new Blob([], { type: "application/octet-stream" }),
+    ""
+  );
   // Field name uses asterisks, not underscores
   fd.append("*eml_nkey*", `${accountId}~${id}~${role}~N`);
   fd.append("*multibtnstate*", "");
@@ -603,13 +622,25 @@ window.editMediaItem = async ({ runtime }, { fileId, newName, folderId, filetype
   fd.append("submitted", "T");
   fd.append("formdisplayview", "NONE");
   fd.append("_button", "");
-  fd.append("sitecategoryfields", "website\x01category_display\x01category\x01isdefault\x01categorydescription");
+  fd.append(
+    "sitecategoryfields",
+    "website\x01category_display\x01category\x01isdefault\x01categorydescription"
+  );
   fd.append("sitecategoryflags", "1\x018\x011\x010\x010");
   fd.append("sitecategoryfieldsets", "\x01\x01\x01\x01");
-  fd.append("sitecategorytypes", "select\x01text\x01slaveselect\x01checkbox\x01text");
+  fd.append(
+    "sitecategorytypes",
+    "select\x01text\x01slaveselect\x01checkbox\x01text"
+  );
   fd.append("sitecategoryorigtypes", "\x01\x01\x01\x01");
-  fd.append("sitecategoryparents", "\x01sitecategory.website\x01sitecategory.website\x01\x01sitecategory.category");
-  fd.append("sitecategorylabels", "Site\x01Site Category\x01\x01Preferred Category\x01Description");
+  fd.append(
+    "sitecategoryparents",
+    "\x01sitecategory.website\x01sitecategory.website\x01\x01sitecategory.category"
+  );
+  fd.append(
+    "sitecategorylabels",
+    "Site\x01Site Category\x01\x01Preferred Category\x01Description"
+  );
   fd.append("sitecategorydata", "");
   fd.append("nextsitecategoryidx", "1");
   fd.append("sitecategoryvalid", "T");
@@ -663,17 +694,76 @@ window.renameNetsuiteFile = async (
   const fullUrl = window.location.origin + fileUrl;
   const fetchResp = await fetch(fullUrl, { credentials: "include" });
   if (!fetchResp.ok) {
-    throw new Error(`Failed to fetch file content for rename: HTTP ${fetchResp.status}`);
+    throw new Error(
+      `Failed to fetch file content for rename: HTTP ${fetchResp.status}`
+    );
   }
   const content = await fetchResp.text();
 
-  return window.updateNetsuiteFileContent({ runtime }, {
-    fileId,
-    fileContent: content,
-    fileName: newName,
-    folderId,
-    mediaType
+  return window.updateNetsuiteFileContent(
+    { runtime },
+    {
+      fileId,
+      fileContent: content,
+      fileName: newName,
+      folderId,
+      mediaType
+    }
+  );
+};
+
+/**
+ * Move files and/or folders to a different parent folder.
+ * Uses the NetSuite bulk-move endpoint (mediaitemfolders.nl?_grpMove=T).
+ * @param {object} N - unused (kept for consistency)
+ * @param {{ srcFolderId: number|string, dstFolderId: number|string, fileIds?: (number|string)[], folderIds?: (number|string)[] }} options
+ */
+window.moveItems = async (
+  N,
+  { srcFolderId, dstFolderId, fileIds = [], folderIds = [] }
+) => {
+  const { csrfToken, accountId } = window.getNetsiteParams();
+  // URL must repeat the folder param and use overwrite=false — matches the working reference request
+  const url = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolders.nl?folder=${srcFolderId}&_grpMove=T&folder=${srcFolderId}&overwrite=true&newfolder=${dstFolderId}`;
+
+  // Body: _csrf first, then folders, then files — matching reference order.
+  // Folders → sa<id>fldT=T
+  // Files   → sa<id>fldF=T
+  const body = new URLSearchParams();
+  body.append("_csrf", csrfToken);
+  console.log("items", { srcFolderId, dstFolderId, fileIds, folderIds });
+
+  for (const folderId of folderIds) body.append(`sa${folderId}fldT`, "T");
+  for (const fileId of fileIds) body.append(`sa${fileId}fldF`, "T");
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      priority: "u=0, i",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "sec-gpc": "1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer: `https://${accountId}.app.netsuite.com/app/common/media/updatemediaitems.nl?action=Move&folder=${srcFolderId}`,
+    body: body.toString(),
+    credentials: "include",
+    mode: "cors"
   });
+
+  if (!response.ok) {
+    throw new Error(`Move failed: HTTP ${response.status}`);
+  }
+
+  console.log("moveItems - success, moved to folder:", dstFolderId);
+  return { moved: true };
 };
 
 window.updateNetsuiteFileContent = async (

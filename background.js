@@ -631,7 +631,7 @@ function tryConnect(port) {
       settled = true;
 
       clearTimeout(timeout);
-      console.log(`[MCP Bridge] connected on port ${port}`);
+      console.debug(`[MCP Bridge] connected on port ${port}`);
 
       connections.set(port, sock);
       attachHandlers(sock, port);
@@ -671,11 +671,11 @@ function attachHandlers(sock, port) {
       return;
     }
 
-    console.log("[MCP Bridge] ←", msg);
+    console.debug("[MCP Bridge] ←", msg);
 
     const response = await handleRequest(msg);
 
-    console.log("[MCP Bridge] →", response);
+    console.debug("[MCP Bridge] →", response);
 
     sock.send(JSON.stringify(response));
   };

@@ -362,6 +362,18 @@ const handlers = {
     console.log("Rename Folder action received", { folderId, newName });
     return await window.editFolder(modules, { folderId, newName, parentFolderId });
   },
+  MOVE_ITEMS: async ({
+    modules,
+    payload: { srcFolderId, dstFolderId, fileIds, folderIds }
+  }) => {
+    console.log("Move Items action received", { srcFolderId, dstFolderId, fileIds, folderIds });
+    return await window.moveItems(modules, {
+      srcFolderId,
+      dstFolderId,
+      fileIds: fileIds ?? [],
+      folderIds: folderIds ?? []
+    });
+  },
   FETCH_ACCOUNTS: async () => {
     console.log("Fetch Accounts action received");
     try {
