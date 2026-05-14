@@ -855,3 +855,54 @@ window.updateNetsuiteFileContent = async (
     isUpdated: status === 200
   };
 };
+
+/**
+ * Executes an arbitrary HTTP request from the NetSuite page context,
+ * forwarding cookies automatically via credentials: "include".
+ *
+ * @param {object} _modules - Unused; kept for handler signature consistency.
+ * @param {object} params
+ * @param {string} params.method  - HTTP method (GET, POST, PUT, PATCH, DELETE, etc.)
+ * @param {string} params.url     - Absolute URL to request.
+ * @param {object} [params.headers] - Additional request headers (key/value pairs).
+ * @param {string} [params.body]  - Request body as a string (for POST/PUT/PATCH).
+ * @returns {Promise<{status: number, statusText: string, headers: Record<string,string>, body: string, duration: number, url: string}>}
+ */
+window.executeHttpRequest = async (_modules, { method, url, headers = {}, body }) => {
+  const start = Date.now();
+  try {
+    const fetchOptions = {
+      method: method.toUpperCase(),
+      credentials: "include",
+      headers
+    };
+    if (body !== undefined && body !== null && body !== "") {
+      fetchOptions.body = body;
+    }
+    const response = await fetch(url, fetchOptions);
+    const duration = Date.now() - start;
+    const responseHeaders = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+    const responseBody = await response.text();
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+      body: responseBody,
+      duration,
+      url: response.url
+    };
+  } catch (error) {
+    return {
+      status: 0,
+      statusText: "Network Error",
+      headers: {},
+      body: "",
+      duration: Date.now() - start,
+      url,
+      error: error.message
+    };
+  }
+};

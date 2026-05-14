@@ -374,6 +374,12 @@ const handlers = {
       folderIds: folderIds ?? []
     });
   },
+  EXECUTE_HTTP_REQUEST: async ({
+    payload: { method, url, headers, body }
+  }) => {
+    console.log("Execute HTTP Request action received", { method, url });
+    return await window.executeHttpRequest(null, { method, url, headers: headers ?? {}, body });
+  },
   FETCH_ACCOUNTS: async () => {
     console.log("Fetch Accounts action received");
     try {

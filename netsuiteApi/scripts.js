@@ -79,7 +79,8 @@ window.getScriptFiles = async ({ query, url }, { scriptIds }) => {
         script.scripttype,
         script.id,
         script.scriptid,
-        file.url
+        file.url,
+        file.folder
     FROM
         script
         INNER JOIN file ON script.scriptfile = file.id
@@ -119,6 +120,8 @@ window.getScriptFiles = async ({ query, url }, { scriptIds }) => {
           scriptType: result.scripttype,
           scriptId: result.scriptid,
           id: result.id,
+          fileId: result.scriptfile,
+          fileFolderId: result.folder,
           scriptFile: body
         };
       } catch (err) {
@@ -128,6 +131,8 @@ window.getScriptFiles = async ({ query, url }, { scriptIds }) => {
           scriptType: result.scripttype,
           scriptId: result.scriptid,
           id: result.id,
+          fileId: result.scriptfile,
+          fileFolderId: result.folder,
           scriptFile: null
         };
       }
