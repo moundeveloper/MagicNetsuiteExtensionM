@@ -230,7 +230,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     MCP_DISCONNECT: handleMcpDisconnect,
     MCP_STATUS: handleMcpStatus,
     MCP_USAGE: handleMcpUsage,
-    MCP_USAGE_CLEAR: handleMcpUsageClear
+    MCP_USAGE_CLEAR: handleMcpUsageClear,
+    MCP_GET_TOOLS: handleMcpGetTools
   };
 
   const messageHandler = messageMap[message.type];
@@ -338,6 +339,13 @@ const handleMcpUsage = ({ sendResponse }) => {
 const handleMcpUsageClear = ({ sendResponse }) => {
   mcpUsageLog.length = 0;
   sendResponse({ ok: true });
+  return true;
+};
+
+const handleMcpGetTools = ({ sendResponse }) => {
+  // Return ALL tool definitions — the UI needs to see disabled tools too so users can re-enable them.
+  const tools = MCP_TOOL_DEFINITIONS.map(({ name, description }) => ({ name, description }));
+  sendResponse(tools);
   return true;
 };
 
@@ -692,6 +700,321 @@ function attachHandlers(sock, port) {
 }
 
 // -----------------------------
+// MCP Tool Definitions
+// -----------------------------
+const MCP_TOOL_DEFINITIONS = [
+  {
+    name: "ping",
+    description: "Ping the Chrome extension. Returns pong.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: {
+          type: "string",
+          description: "Optional message to echo back"
+        }
+      }
+    }
+  },
+  {
+    name: "suiteql_get_guide",
+    description:
+      "CALL THIS FIRST before any SuiteQL work. Returns the complete usage guide: correct syntax rules (no LIMIT — use ROWNUM), the mandatory discovery workflow, common table names, and worked examples.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  // ── SuiteQL Tools ──
+  {
+    name: "suiteql_search_tables",
+    description: "Search available SuiteQL tables by keyword. Returns table IDs and labels matching the search term.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search keyword to filter tables (e.g. 'customer', 'transaction'). Leave empty to list all tables."
+        }
+      }
+    }
+  },
+  {
+    name: "suiteql_get_table_fields",
+    description: "Get all columns/fields for a specific SuiteQL table. Returns field IDs, labels, and data types.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tableName: {
+          type: "string",
+          description: "The exact table ID (e.g. 'customer', 'transaction', 'item')."
+        }
+      },
+      required: ["tableName"]
+    }
+  },
+  {
+    name: "suiteql_get_table_joins",
+    description: "Get available joins/relationships for a specific SuiteQL table. Returns join labels, target tables, and join conditions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tableName: {
+          type: "string",
+          description: "The exact table ID to get joins for."
+        }
+      },
+      required: ["tableName"]
+    }
+  },
+  {
+    name: "suiteql_execute_query",
+    description: "Execute a SuiteQL query. NEVER use LIMIT — it is not valid SuiteQL syntax and will error. Use ROWNUM in a WHERE clause to limit rows: WHERE ROWNUM <= 25",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sql: {
+          type: "string",
+          description: "Valid SuiteQL query. Must use ROWNUM <= N for row limiting, never LIMIT."
+        }
+      },
+      required: ["sql"]
+    }
+  },
+  {
+    name: "suiteql_discover_field_values",
+    description: "Sample DISTINCT actual values for a specific column in a table. Use this to discover exact values for WHERE clauses.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tableName: {
+          type: "string",
+          description: "The exact table ID (e.g. 'transaction', 'customrecord_foo')."
+        },
+        fieldId: {
+          type: "string",
+          description: "The column ID to sample values for (e.g. 'status', 'custrecord_ctkc_enrichment_status')."
+        }
+      },
+      required: ["tableName", "fieldId"]
+    }
+  },
+  // ── NetSuite Docs Tools ──
+  {
+    name: "netsuite_search_docs",
+    description:
+      "Search the official NetSuite help documentation. Returns a list of matching pages with title, URL, and summary. Use this first to find relevant documentation, then call 'netsuite_read_doc_page' with a returned URL to get the full content. Always use this tool for any factual question about NetSuite — do NOT answer from training data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search keywords (e.g. 'SuiteScript record load', 'saved search filters', 'revenue recognition')."
+        }
+      },
+      required: ["query"]
+    }
+  },
+  {
+    name: "netsuite_read_doc_page",
+    description:
+      "Read the full text content of a NetSuite documentation page. Pass a URL returned by 'netsuite_search_docs'. Returns the page's main text (up to 10 000 characters). Always include a References section with the page URL in your response after reading.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Full URL of the NetSuite help page (from netsuite_search_docs results)."
+        }
+      },
+      required: ["url"]
+    }
+  },
+  // ── Record Tools ──
+  // Workflow: show/view/get any record → netsuite_load_record (directly, no other steps needed)
+  //           unsure of recordType string → netsuite_list_record_types first
+  //           want to know what fields a type has → netsuite_get_record_fields
+  {
+    name: "netsuite_load_record",
+    description:
+      "ALWAYS use this tool when the user asks to 'show', 'view', 'display', 'get', or 'load' a NetSuite record by ID. " +
+      "Returns body fields only (no sublist rows) — fast and token-efficient. " +
+      "If the user also needs line items or sublist rows, call netsuite_get_record_sublists afterward. " +
+      "Do NOT use SuiteQL as a substitute — this tool returns all body field values (value + display text) directly from the record API. " +
+      "Common recordType values: 'script' (SuiteScript), 'scriptdeployment', 'customer', 'salesorder', 'invoice', 'purchaseorder', 'employee', 'vendor', 'item', 'customrecord_<scriptid>' for custom records. " +
+      "If you are unsure of the correct recordType string, call netsuite_list_record_types first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recordType: {
+          type: "string",
+          description: "The SuiteScript record type ID. Examples: 'script', 'scriptdeployment', 'customer', 'salesorder', 'invoice', 'purchaseorder', 'employee', 'vendor', 'customrecord_foo'. Call netsuite_list_record_types if unsure."
+        },
+        recordId: {
+          type: "string",
+          description: "The internal numeric ID of the record to load (e.g. '3309')."
+        }
+      },
+      required: ["recordType", "recordId"]
+    }
+  },
+  {
+    name: "netsuite_get_record_sublists",
+    description:
+      "Get the sublist rows (line items) for a NetSuite record. " +
+      "Use this after netsuite_load_record when the user specifically needs line-item data (e.g. order items, expense lines, inventory lines). " +
+      "Do NOT call this unless sublists are explicitly needed — sublist data can be very large. " +
+      "Specify sublistIds to limit which sublists are returned; omit to get all sublists. " +
+      "Common sublists: 'item' (line items), 'expense' (expense lines), 'apply' (applied transactions), 'links' (related records).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recordType: {
+          type: "string",
+          description: "The SuiteScript record type ID (e.g. 'salesorder', 'invoice', 'purchaseorder')."
+        },
+        recordId: {
+          type: "string",
+          description: "The internal numeric ID of the record (e.g. '3309')."
+        },
+        sublistIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional: limit which sublists are returned (e.g. ['item', 'expense']). Omit to return all sublists — can be large on transactions."
+        }
+      },
+      required: ["recordType", "recordId"]
+    }
+  },
+  {
+    name: "netsuite_list_record_types",
+    description:
+      "List ALL available NetSuite record types — both standard built-in types and custom record types in this account. Returns { name, id } pairs. " +
+      "Use this ONLY when you need to discover the correct `recordType` string to pass to netsuite_load_record or netsuite_get_record_fields and you cannot infer it from context. " +
+      "Most common types (no lookup needed): 'script', 'scriptdeployment', 'customer', 'salesorder', 'invoice', 'purchaseorder', 'employee', 'vendor', 'customrecord_<scriptid>'.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "netsuite_get_record_fields",
+    description:
+      "Get the list of available body fields and sublist fields for a record type, WITHOUT loading a real record. " +
+      "Use this as a metadata/discovery tool when you need to know what fields a type exposes before querying or building logic around it. " +
+      "You do NOT need to call this before netsuite_load_record — load_record already returns all fields.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recordType: {
+          type: "string",
+          description: "The record type ID (e.g. 'script', 'salesorder', 'customer', 'customrecord_foo')."
+        }
+      },
+      required: ["recordType"]
+    }
+  },
+  // ── Bundle Tools ──
+  {
+    name: "netsuite_list_bundles",
+    description:
+      "List SuiteApp bundles in the current NetSuite account. Returns each bundle's name, ID, version, app ID, abstract, creator, dates, and a `type` field ('installed' or 'created'). Use the `filter` parameter to narrow results: 'installed' returns only marketplace/3rd-party bundles, 'created' returns only bundles built and published in-house, 'all' (default) returns both.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: {
+          type: "string",
+          enum: ["all", "installed", "created"],
+          description:
+            "'all' (default) – both installed and created bundles. 'installed' – only bundles downloaded from the SuiteApp marketplace (type=I). 'created' – only bundles built and published in-house (type=S)."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_get_bundle_components",
+    description:
+      "Get the detailed list of components installed by a specific bundle, identified by its Bundle ID. Returns components grouped by category (e.g. 'Script Files', 'Custom Records') and subcategory, with each component's name, script/record ID, references, and lock status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bundleId: {
+          type: "string",
+          description: "The numeric Bundle ID to inspect (e.g. '123456'). Obtain this from netsuite_list_bundles."
+        },
+        bundleName: {
+          type: "string",
+          description: "Optional bundle name for context."
+        }
+      },
+      required: ["bundleId"]
+    }
+  },
+  // ── File Cabinet Tools ──
+  // Recommended workflow:
+  //   1. netsuite_find_folder(name:"test") → get folder id
+  //   2. netsuite_list_folder(folderId:"123") → see files + subfolders
+  //   3. netsuite_find_file(name:"foo") → locate a specific file globally
+  {
+    name: "netsuite_find_folder",
+    description:
+      "Search the ENTIRE NetSuite File Cabinet for folders matching a name or ID. Searches globally (not just root). " +
+      "Use this first when you don't know a folder's ID. " +
+      "After finding the folder, call netsuite_list_folder with the returned id to see its contents. " +
+      "Returns matching folders with id, name, and parent folder id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Exact internal ID of the folder (e.g. '67890'). Use for direct lookup."
+        },
+        name: {
+          type: "string",
+          description: "Partial folder name to search for globally (case-insensitive). E.g. 'test to remove' will find any folder containing that text anywhere in the File Cabinet."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_list_folder",
+    description:
+      "List the immediate contents of a File Cabinet folder — returns both files and subfolders in a single call. " +
+      "Use this after netsuite_find_folder to explore a folder's contents. " +
+      "Returns { folderId, subfolders: [{id, name}], files: [{id, name, filesize, filetype, url}] }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folderId: {
+          type: "string",
+          description: "Internal ID of the folder to list (e.g. '12345'). Obtain from netsuite_find_folder."
+        }
+      },
+      required: ["folderId"]
+    }
+  },
+  {
+    name: "netsuite_find_file",
+    description:
+      "Search the ENTIRE NetSuite File Cabinet for files matching a name or ID. Searches globally across all folders. " +
+      "Returns matching files with id, name, folder (parent folder id), filesize, filetype, and url.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Exact internal ID of the file (e.g. '12345'). Use for direct lookup."
+        },
+        name: {
+          type: "string",
+          description: "Partial file name to search globally (case-insensitive LIKE match). E.g. 'myScript' will match 'myScript.js' anywhere in the File Cabinet."
+        }
+      }
+    }
+  }
+];
+
+// -----------------------------
 // MCP tool handling
 // -----------------------------
 async function handleRequest({ requestId, method, params }) {
@@ -699,108 +1022,22 @@ async function handleRequest({ requestId, method, params }) {
     let result;
 
     if (method === "tools/list") {
+      const storageResult = await chrome.storage.sync.get(["magic_netsuite_settings"]);
+      const disabledTools = storageResult?.magic_netsuite_settings?.mcpDisabledTools ?? [];
       result = {
-        tools: [
-          {
-            name: "ping",
-            description: "Ping the Chrome extension. Returns pong.",
-            inputSchema: {
-              type: "object",
-              properties: {
-                message: {
-                  type: "string",
-                  description: "Optional message to echo back"
-                }
-              }
-            }
-          },
-          {
-            name: "suiteql_get_guide",
-            description:
-              "CALL THIS FIRST before any SuiteQL work. Returns the complete usage guide: correct syntax rules (no LIMIT — use ROWNUM), the mandatory discovery workflow, common table names, and worked examples.",
-            inputSchema: {
-              type: "object",
-              properties: {}
-            }
-          },
-          // ── SuiteQL Tools ──
-          {
-            name: "suiteql_search_tables",
-            description: "Search available SuiteQL tables by keyword. Returns table IDs and labels matching the search term.",
-            inputSchema: {
-              type: "object",
-              properties: {
-                query: {
-                  type: "string",
-                  description: "Search keyword to filter tables (e.g. 'customer', 'transaction'). Leave empty to list all tables."
-                }
-              }
-            }
-          },
-          {
-            name: "suiteql_get_table_fields",
-            description: "Get all columns/fields for a specific SuiteQL table. Returns field IDs, labels, and data types.",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tableName: {
-                  type: "string",
-                  description: "The exact table ID (e.g. 'customer', 'transaction', 'item')."
-                }
-              },
-              required: ["tableName"]
-            }
-          },
-          {
-            name: "suiteql_get_table_joins",
-            description: "Get available joins/relationships for a specific SuiteQL table. Returns join labels, target tables, and join conditions.",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tableName: {
-                  type: "string",
-                  description: "The exact table ID to get joins for."
-                }
-              },
-              required: ["tableName"]
-            }
-          },
-          {
-            name: "suiteql_execute_query",
-            description: "Execute a SuiteQL query. NEVER use LIMIT — it is not valid SuiteQL syntax and will error. Use ROWNUM in a WHERE clause to limit rows: WHERE ROWNUM <= 25",
-            inputSchema: {
-              type: "object",
-              properties: {
-                sql: {
-                  type: "string",
-                  description: "Valid SuiteQL query. Must use ROWNUM <= N for row limiting, never LIMIT."
-                }
-              },
-              required: ["sql"]
-            }
-          },
-          {
-            name: "suiteql_discover_field_values",
-            description: "Sample DISTINCT actual values for a specific column in a table. Use this to discover exact values for WHERE clauses.",
-            inputSchema: {
-              type: "object",
-              properties: {
-                tableName: {
-                  type: "string",
-                  description: "The exact table ID (e.g. 'transaction', 'customrecord_foo')."
-                },
-                fieldId: {
-                  type: "string",
-                  description: "The column ID to sample values for (e.g. 'status', 'custrecord_ctkc_enrichment_status')."
-                }
-              },
-              required: ["tableName", "fieldId"]
-            }
-          }
-        ]
+        tools: disabledTools.length > 0
+          ? MCP_TOOL_DEFINITIONS.filter(t => !disabledTools.includes(t.name))
+          : MCP_TOOL_DEFINITIONS
       };
     } else if (method === "tools/call") {
       const { name, arguments: args = {} } = params;
+
+      // Reject calls to disabled tools before execution
+      const storageForCall = await chrome.storage.sync.get(["magic_netsuite_settings"]);
+      const disabledToolsForCall = storageForCall?.magic_netsuite_settings?.mcpDisabledTools ?? [];
+      if (disabledToolsForCall.includes(name)) {
+        throw new Error(`Tool "${name}" is disabled. Enable it in the MCP Server settings.`);
+      }
 
       try {
         if (name === "ping") {
@@ -810,6 +1047,28 @@ async function handleRequest({ requestId, method, params }) {
           result = { content: [{ type: "text", text: SUITEQL_GUIDE }] };
         } else if (name.startsWith("suiteql_")) {
           result = await handleSuiteQLTool(name, args);
+        } else if (name === "netsuite_search_docs") {
+          result = await handleNetsuiteSearchDocs(args);
+        } else if (name === "netsuite_read_doc_page") {
+          result = await handleNetsuiteReadDocPage(args);
+        } else if (name === "netsuite_list_bundles") {
+          result = await handleNetsuitListBundles(args);
+        } else if (name === "netsuite_get_bundle_components") {
+          result = await handleNetsuiteGetBundleComponents(args);
+        } else if (name === "netsuite_list_record_types") {
+          result = await handleNetsuiteListRecordTypes();
+        } else if (name === "netsuite_load_record") {
+          result = await handleNetsuiteLoadRecord(args);
+        } else if (name === "netsuite_get_record_sublists") {
+          result = await handleNetsuiteGetRecordSublists(args);
+        } else if (name === "netsuite_get_record_fields") {
+          result = await handleNetsuiteGetRecordFields(args);
+        } else if (name === "netsuite_find_file") {
+          result = await handleNetsuiteFindFile(args);
+        } else if (name === "netsuite_find_folder") {
+          result = await handleNetsuiteFindFolder(args);
+        } else if (name === "netsuite_list_folder") {
+          result = await handleNetsuiteListFolder(args);
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
@@ -983,6 +1242,380 @@ async function handleSuiteQLTool(toolName, args) {
     content: [{
       type: "text",
       text: JSON.stringify(resultData, null, 2)
+    }]
+  };
+}
+
+// -----------------------------
+// NetSuite Docs Tool Helpers
+// -----------------------------
+
+async function handleNetsuiteSearchDocs(args) {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab || !tab.url) {
+    throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+  }
+
+  const { protocol, host } = new URL(tab.url);
+  const baseUrl = `${protocol}//${host}`;
+  const searchUrl = `${baseUrl}/app/help/helpcenter.nl?search=${encodeURIComponent(String(args.query ?? ""))}`;
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "FETCH_HELP_PAGE",
+    data: { url: searchUrl, operation: "search", baseUrl },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    throw new Error(response?.message ?? "Failed to fetch NetSuite docs");
+  }
+
+  const results = response.message?.results ?? [];
+  const payload = results.length === 0
+    ? { results: [], message: "No results found for the given query." }
+    : { results };
+
+  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+}
+
+async function handleNetsuiteReadDocPage(args) {
+  const url = String(args.url ?? "");
+  if (!url.includes("app.netsuite.com")) {
+    throw new Error("URL must point to an app.netsuite.com help page.");
+  }
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) {
+    throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+  }
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "FETCH_HELP_PAGE",
+    data: { url, operation: "read" },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    throw new Error(response?.message ?? "Failed to fetch doc page");
+  }
+
+  const content = response.message?.content ?? "";
+  if (!content) throw new Error("Could not parse content from the page.");
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ url, content: content.slice(0, 10_000) }, null, 2)
+    }]
+  };
+}
+
+// -----------------------------
+// Bundle Tool Helpers
+// -----------------------------
+
+async function handleNetsuitListBundles(args) {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab || !tab.url) {
+    throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+  }
+
+  const { hostname } = new URL(tab.url);
+
+  // Map friendly filter names to NetSuite type codes
+  const filterMap = { installed: "I", created: "S", all: "both" };
+  const bundleType = filterMap[args?.filter] ?? "both";
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "FETCH_BUNDLES",
+    data: { domain: hostname, bundleType },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    throw new Error(response?.message ?? "Failed to fetch bundle list");
+  }
+
+  const bundles = response.message?.bundles ?? [];
+  const installed = bundles.filter(b => b.type === "installed").length;
+  const created = bundles.filter(b => b.type === "created").length;
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ bundles, count: bundles.length, installed, created }, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteGetBundleComponents(args) {
+  const bundleId = String(args.bundleId ?? "");
+  if (!bundleId) throw new Error("bundleId is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab || !tab.url) {
+    throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+  }
+
+  const { hostname } = new URL(tab.url);
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "FETCH_BUNDLE_COMPONENTS",
+    data: { domain: hostname, bundleId },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    throw new Error(response?.message ?? `Failed to fetch components for bundle ${bundleId}`);
+  }
+
+  const components = response.message?.components ?? [];
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ bundleId, components, count: components.length }, null, 2)
+    }]
+  };
+}
+
+// -----------------------------
+// Record Tool Helpers
+// -----------------------------
+
+async function handleNetsuiteLoadRecord(args) {
+  const recordType = String(args.recordType ?? "");
+  const recordId = String(args.recordId ?? "");
+  if (!recordType) throw new Error("recordType is required.");
+  if (!recordId) throw new Error("recordId is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "LOAD_RECORD",
+    data: { type: recordType, id: recordId },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : `Failed to load record ${recordType}/${recordId}`;
+    throw new Error(errMsg);
+  }
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(response.message, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteGetRecordSublists(args) {
+  const recordType = String(args.recordType ?? "");
+  const recordId = String(args.recordId ?? "");
+  if (!recordType) throw new Error("recordType is required.");
+  if (!recordId) throw new Error("recordId is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "LOAD_RECORD_SUBLISTS",
+    data: { type: recordType, id: recordId, sublistIds: args.sublistIds ?? null },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : `Failed to load sublists for record ${recordType}/${recordId}`;
+    throw new Error(errMsg);
+  }
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(response.message, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteGetRecordFields(args) {
+  const recordType = String(args.recordType ?? "");
+  if (!recordType) throw new Error("recordType is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "GET_RECORD_FIELDS",
+    data: { type: recordType },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : `Failed to get fields for record type ${recordType}`;
+    throw new Error(errMsg);
+  }
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(response.message, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteListRecordTypes() {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "GET_ALL_RECORD_TYPES",
+    data: {},
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : "Failed to get record types";
+    throw new Error(errMsg);
+  }
+
+  const records = response.message ?? [];
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ count: records.length, recordTypes: records }, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteFindFile(args) {
+  const { id, name } = args ?? {};
+  if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const conditions = [];
+  if (id) conditions.push(`id = ${parseInt(id, 10)}`);
+  if (name) conditions.push(`LOWER(name) LIKE LOWER('%${String(name).replace(/'/g, "''")}%')`);
+  const whereClause = conditions.length === 1 ? conditions[0] : `(${conditions.join(" OR ")})`;
+  const sql = `SELECT id, name, folder, filesize, filetype, url FROM file WHERE ${whereClause} AND ROWNUM <= 25`;
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "RUN_SUITEQL_QUERY",
+    data: { sql, limit: 25 },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : "Failed to find files";
+    throw new Error(errMsg);
+  }
+
+  const files = response.message ?? [];
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ count: files.length, files }, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteFindFolder(args) {
+  const { id, name } = args ?? {};
+  if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const conditions = [];
+  if (id) conditions.push(`id = ${parseInt(id, 10)}`);
+  if (name) conditions.push(`LOWER(name) LIKE LOWER('%${String(name).replace(/'/g, "''")}%')`);
+  const whereClause = conditions.length === 1 ? conditions[0] : `(${conditions.join(" OR ")})`;
+  const sql = `SELECT id, name, parent FROM MediaItemFolder WHERE ${whereClause} AND ROWNUM <= 25`;
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "RUN_SUITEQL_QUERY",
+    data: { sql, limit: 25 },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : "Failed to find folders";
+    throw new Error(errMsg);
+  }
+
+  const folders = response.message ?? [];
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ count: folders.length, folders }, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteListFolder(args) {
+  const folderId = String(args?.folderId ?? "").trim();
+  if (!folderId) throw new Error("folderId is required.");
+  const idNum = parseInt(folderId, 10);
+  if (isNaN(idNum)) throw new Error("folderId must be a numeric folder ID.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  // Run both queries in parallel
+  const [subfoldersResp, filesResp] = await Promise.all([
+    sendMessageToTab(tab.id, {
+      action: "RUN_SUITEQL_QUERY",
+      data: { sql: `SELECT id, name FROM MediaItemFolder WHERE parent = ${idNum} AND ROWNUM <= 200`, limit: 200 },
+      mode: "normal"
+    }),
+    sendMessageToTab(tab.id, {
+      action: "RUN_SUITEQL_QUERY",
+      data: { sql: `SELECT id, name, filesize, filetype, url FROM file WHERE folder = ${idNum} AND ROWNUM <= 200`, limit: 200 },
+      mode: "normal"
+    })
+  ]);
+
+  if (!subfoldersResp || subfoldersResp.status === "error") {
+    const msg = subfoldersResp?.message;
+    throw new Error(msg ? (typeof msg === "string" ? msg : JSON.stringify(msg)) : "Failed to list subfolders");
+  }
+  if (!filesResp || filesResp.status === "error") {
+    const msg = filesResp?.message;
+    throw new Error(msg ? (typeof msg === "string" ? msg : JSON.stringify(msg)) : "Failed to list files");
+  }
+
+  const subfolders = subfoldersResp.message ?? [];
+  const files = filesResp.message ?? [];
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        folderId: idNum,
+        subfolderCount: subfolders.length,
+        fileCount: files.length,
+        subfolders,
+        files
+      }, null, 2)
     }]
   };
 }

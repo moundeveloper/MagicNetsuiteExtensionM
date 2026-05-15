@@ -380,6 +380,50 @@ const handlers = {
     console.log("Execute HTTP Request action received", { method, url });
     return await window.executeHttpRequest(null, { method, url, headers: headers ?? {}, body });
   },
+  LOAD_RECORD: async ({ modules, payload: { type, id } }) => {
+    console.log("Load Record (body only) action received", { type, id });
+    return window.loadRecordById(modules, { type, id, bodyOnly: true });
+  },
+  LOAD_RECORD_SUBLISTS: async ({ modules, payload: { type, id, sublistIds } }) => {
+    console.log("Load Record Sublists action received", { type, id, sublistIds });
+    return window.loadRecordSublists(modules, { type, id, sublistIds: sublistIds ?? null });
+  },
+  GET_RECORD_FIELDS: async ({ modules, payload: { type } }) => {
+    console.log("Get Record Fields action received", { type });
+    return window.getRecordFields(modules, { type });
+  },
+  FIND_FOLDER: async ({ modules, payload: { id, name } }) => {
+    console.log("Find Folder action received", { id, name });
+    if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
+    const conditions = [];
+    if (id) conditions.push(`id = ${parseInt(id, 10)}`);
+    if (name) conditions.push(`LOWER(name) LIKE LOWER('%${String(name).replace(/'/g, "''")}%')`);
+    const whereClause = conditions.length === 1 ? conditions[0] : `(${conditions.join(" OR ")})`;
+    const sql = `SELECT id, name, parent FROM MediaItemFolder WHERE ${whereClause} AND ROWNUM <= 25`;
+    const folders = await window.runSuiteQLQuery(modules, sql, 25);
+    return { count: folders.length, folders };
+  },
+  FIND_FILE: async ({ modules, payload: { id, name } }) => {
+    console.log("Find File action received", { id, name });
+    if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
+    const conditions = [];
+    if (id) conditions.push(`id = ${parseInt(id, 10)}`);
+    if (name) conditions.push(`LOWER(name) LIKE LOWER('%${String(name).replace(/'/g, "''")}%')`);
+    const whereClause = conditions.length === 1 ? conditions[0] : `(${conditions.join(" OR ")})`;
+    const sql = `SELECT id, name, folder, filesize, filetype, url FROM file WHERE ${whereClause} AND ROWNUM <= 25`;
+    const files = await window.runSuiteQLQuery(modules, sql, 25);
+    return { count: files.length, files };
+  },
+  LIST_FOLDER: async ({ modules, payload: { folderId } }) => {
+    console.log("List Folder action received", { folderId });
+    const idNum = parseInt(String(folderId ?? ""), 10);
+    if (isNaN(idNum)) throw new Error("folderId must be a numeric folder ID.");
+    const [subfolders, files] = await Promise.all([
+      window.runSuiteQLQuery(modules, `SELECT id, name FROM MediaItemFolder WHERE parent = ${idNum} AND ROWNUM <= 200`, 200),
+      window.runSuiteQLQuery(modules, `SELECT id, name, filesize, filetype, url FROM file WHERE folder = ${idNum} AND ROWNUM <= 200`, 200)
+    ]);
+    return { folderId: idNum, subfolderCount: subfolders.length, fileCount: files.length, subfolders, files };
+  },
   FETCH_ACCOUNTS: async () => {
     console.log("Fetch Accounts action received");
     try {
