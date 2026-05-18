@@ -997,7 +997,8 @@ const MCP_TOOL_DEFINITIONS = [
     name: "netsuite_find_file",
     description:
       "Search the ENTIRE NetSuite File Cabinet for files matching a name or ID. Searches globally across all folders. " +
-      "Returns matching files with id, name, folder (parent folder id), filesize, filetype, and url.",
+      "Returns matching files with id, name, folder (parent folder id), filesize, filetype, and url. " +
+      "To read the actual content of a file after finding it, call netsuite_read_file with the file id.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1010,6 +1011,24 @@ const MCP_TOOL_DEFINITIONS = [
           description: "Partial file name to search globally (case-insensitive LIKE match). E.g. 'myScript' will match 'myScript.js' anywhere in the File Cabinet."
         }
       }
+    }
+  },
+  {
+    name: "netsuite_read_file",
+    description:
+      "Read the actual content of a NetSuite File Cabinet file by its internal ID. " +
+      "ALWAYS use this tool when you have a file ID (e.g. from a SuiteQL query result or from netsuite_find_file) and the user wants to see or display the file contents. " +
+      "Returns the file name, content type, and full text content (or base64 for binary files). " +
+      "Works with any text-based file: .js, .json, .xml, .csv, .html, .ftl, .txt, etc.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: {
+          type: "string",
+          description: "The internal numeric ID of the file to read (e.g. '21301'). Obtain this from a SuiteQL query or from netsuite_find_file."
+        }
+      },
+      required: ["fileId"]
     }
   }
 ];
@@ -1063,6 +1082,8 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteGetRecordSublists(args);
         } else if (name === "netsuite_get_record_fields") {
           result = await handleNetsuiteGetRecordFields(args);
+        } else if (name === "netsuite_read_file") {
+          result = await handleNetsuiteReadFile(args);
         } else if (name === "netsuite_find_file") {
           result = await handleNetsuiteFindFile(args);
         } else if (name === "netsuite_find_folder") {
@@ -1615,6 +1636,64 @@ async function handleNetsuiteListFolder(args) {
         fileCount: files.length,
         subfolders,
         files
+      }, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteReadFile(args) {
+  const fileId = String(args?.fileId ?? "").trim();
+  if (!fileId) throw new Error("fileId is required.");
+  const idNum = parseInt(fileId, 10);
+  if (isNaN(idNum)) throw new Error("fileId must be a numeric file ID.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  // Step 1: Resolve the file URL via SuiteQL
+  const urlResp = await sendMessageToTab(tab.id, {
+    action: "RUN_SUITEQL_QUERY",
+    data: { sql: `SELECT id, name, url, filetype, filesize FROM file WHERE id = ${idNum} AND ROWNUM <= 1`, limit: 1 },
+    mode: "normal"
+  });
+
+  if (!urlResp || urlResp.status === "error") {
+    const msg = urlResp?.message;
+    throw new Error(msg ? (typeof msg === "string" ? msg : JSON.stringify(msg)) : `Failed to look up file ${fileId}`);
+  }
+
+  const rows = urlResp.message ?? [];
+  const fileRow = Array.isArray(rows) ? rows[0] : (rows?.results?.[0] ?? null);
+  if (!fileRow) throw new Error(`File with ID ${fileId} not found in the File Cabinet.`);
+
+  const { name: fileName, url: fileUrl, filetype, filesize } = fileRow;
+  if (!fileUrl) throw new Error(`File ${fileId} exists but has no accessible URL.`);
+
+  // Step 2: Fetch the actual file content
+  const contentResp = await sendMessageToTab(tab.id, {
+    action: "FETCH_FILE_CONTENT",
+    data: { fileUrl },
+    mode: "normal"
+  });
+
+  if (!contentResp || contentResp.status === "error") {
+    const msg = contentResp?.message;
+    throw new Error(msg ? (typeof msg === "string" ? msg : JSON.stringify(msg)) : `Failed to fetch content of file ${fileId}`);
+  }
+
+  const { content, contentType, binary } = contentResp.message ?? {};
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        fileId: idNum,
+        fileName,
+        filetype,
+        filesize,
+        contentType,
+        binary: binary ?? false,
+        content: content ?? ""
       }, null, 2)
     }]
   };
