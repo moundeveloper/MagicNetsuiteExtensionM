@@ -195,9 +195,9 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
   // delegate to the suitelet, which runs under its own governance budget.
   try {
     const script = N.runtime.getCurrentScript();
-    if (script.getRemainingUsage() < 200) {
+    if (script.getRemainingUsage() < 60) {
       console.warn(
-        "[runSuiteQLQuery] Low governance (<200 units remaining), switching directly to suitelet fallback"
+        "[runSuiteQLQuery] Low governance (<60 units remaining), switching directly to suitelet fallback"
       );
       return runSuiteQLViaScriptlet(
         N,
@@ -239,7 +239,14 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
       primaryErr
     );
     const returnTotals = effectiveLimit !== Infinity;
-    return runSuiteQLViaScriptlet(N, sql, limit ?? 1000, returnTotals);
+    try {
+      return await runSuiteQLViaScriptlet(N, sql, limit ?? 1000, returnTotals);
+    } catch (fallbackErr) {
+      if (String(fallbackErr?.message ?? fallbackErr).includes("Failed to discover active SuiteQL suitelet script")) {
+        throw primaryErr;
+      }
+      throw fallbackErr;
+    }
   }
 };
 
@@ -262,7 +269,14 @@ window.getSuiteQLCount = async (N, sql) => {
       "[getSuiteQLCount] N/query API failed, trying suitelet fallback:",
       primaryErr
     );
-    const result = await runSuiteQLViaScriptlet(N, sql, 5, true);
-    return result.totalCount;
+    try {
+      const result = await runSuiteQLViaScriptlet(N, sql, 5, true);
+      return result.totalCount;
+    } catch (fallbackErr) {
+      if (String(fallbackErr?.message ?? fallbackErr).includes("Failed to discover active SuiteQL suitelet script")) {
+        throw primaryErr;
+      }
+      throw fallbackErr;
+    }
   }
 };

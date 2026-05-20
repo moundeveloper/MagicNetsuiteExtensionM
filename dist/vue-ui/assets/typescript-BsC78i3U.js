@@ -1,1 +1,0 @@
-import{n as e,t}from"./typescript-gl_9gaLM.js";export{t as conf,e as language};

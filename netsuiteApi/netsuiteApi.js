@@ -174,6 +174,16 @@ const handlers = {
     if (modules) return "connected";
     return "disconnected";
   },
+  CHECK_GOVERNANCE: async ({ modules }) => {
+    try {
+      const script = modules.runtime.getCurrentScript();
+      const remaining = script.getRemainingUsage();
+      return { remaining };
+    } catch {
+      // Not in a governance-tracked context — report as unknown
+      return { remaining: -1 };
+    }
+  },
   AVAILABLE_MODULES: async ({ modules }) => {
     console.log("Available Modules action received");
     return Object.keys(modules);

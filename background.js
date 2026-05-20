@@ -314,10 +314,16 @@ const handleMcpDisconnect = ({ sendResponse }) => {
 };
 
 const handleMcpStatus = ({ sendResponse }) => {
-  const isConnected = [...connections.values()].some(
-    (s) => s.readyState === WebSocket.OPEN
-  );
-  sendResponse({ status: isConnected ? "connected" : "disconnected" });
+  const connectionDetails = [...connections.entries()].map(([port, sock]) => ({
+    port,
+    state: sock.readyState === WebSocket.OPEN ? "open" : "closed"
+  }));
+  const isConnected = connectionDetails.some((c) => c.state === "open");
+  sendResponse({
+    status: isConnected ? "connected" : "disconnected",
+    connections: connectionDetails,
+    dedicatedTab: mcpDedicatedTabId ? { tabId: mcpDedicatedTabId, accountId: mcpDedicatedTabAccountId } : null
+  });
   return true;
 };
 
@@ -506,6 +512,16 @@ const MCP_RECONNECT_ALARM = "mcp-reconnect";
 const connections = new Map();
 let isRefreshing = false;
 
+// ── MCP: Dedicated Tab for Governance ──
+// When a tab runs out of SuiteScript governance, the MCP server creates a
+// persistent (non-temporary) tab on mainsetup.nl for the preferred account.
+// This tab stays open and auto-refreshes when governance drops below the threshold.
+let mcpDedicatedTabId = null;
+let mcpDedicatedTabAccountId = null;
+const MCP_GOVERNANCE_THRESHOLD = 100;
+let mcpDedicatedTabRefreshing = false;
+let mcpDedicatedTabCreating = false;
+
 // -----------------------------
 // Entry point: check settings and connect if enabled
 // -----------------------------
@@ -571,6 +587,250 @@ async function mcpDisconnect() {
   isRefreshing = false;
   console.log("[MCP Bridge] Manually disconnected");
 }
+
+// -----------------------------
+// MCP Dedicated Tab Management
+//
+// When an MCP tool call detects low governance on the selected tab, it creates
+// a persistent tab at /app/setup/mainsetup.nl for the preferred account.
+// This tab stays open (not temporary) and auto-refreshes to replenish
+// governance when it drops below MCP_GOVERNANCE_THRESHOLD.
+// -----------------------------
+
+/**
+ * Checks SuiteScript governance remaining on a tab.
+ * Returns the remaining units or -1 if unknown.
+ */
+async function checkTabGovernance(tabId) {
+  try {
+    const response = await sendMessageToTab(tabId, {
+      action: "CHECK_GOVERNANCE",
+      data: {},
+      mode: "normal"
+    });
+    if (response?.status === "ok" && response.message?.remaining !== undefined) {
+      return response.message.remaining;
+    }
+    return -1;
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Waits for a tab to finish loading (status = "complete").
+ * Resolves once the tab is ready.
+ */
+function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error(`Tab ${tabId} did not finish loading in ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const listener = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        // Allow a small delay for the content script to initialize
+        setTimeout(() => resolve(), 500);
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+
+    // Check if the tab is already complete
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(new Error(`Tab ${tabId} no longer exists`));
+        return;
+      }
+      if (tab.status === "complete") {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        setTimeout(() => resolve(), 500);
+      }
+    });
+  });
+}
+
+/**
+ * Creates a persistent dedicated MCP tab for the given account domain.
+ * This is NOT a temporary tab — it stays open and is reused across MCP calls.
+ */
+async function createMcpDedicatedTab(accountDomain) {
+  // Guard: if another creation is in progress, wait for it to finish
+  if (mcpDedicatedTabCreating) {
+    console.log(`[MCP Dedicated Tab] Creation already in progress, waiting...`);
+    return waitForExistingDedicatedTab(accountDomain);
+  }
+
+  const url = `https://${accountDomain}/app/setup/mainsetup.nl?sc=-90`;
+
+  console.log(`[MCP Dedicated Tab] Creating persistent tab for ${accountDomain}`);
+
+  mcpDedicatedTabCreating = true;
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.create({ url, active: false }, async (tab) => {
+      if (!tab?.id) {
+        mcpDedicatedTabCreating = false;
+        return reject(new Error("Failed to create dedicated MCP tab"));
+      }
+
+      try {
+        await waitForTabComplete(tab.id);
+        mcpDedicatedTabId = tab.id;
+        mcpDedicatedTabAccountId = extractAccountIdFromUrl(tab.url || url);
+        mcpDedicatedTabCreating = false;
+        console.log(`[MCP Dedicated Tab] Created tab ${tab.id} for account ${mcpDedicatedTabAccountId}`);
+        resolve(tab);
+      } catch (err) {
+        mcpDedicatedTabCreating = false;
+        // Tab failed to load — clean up
+        try { chrome.tabs.remove(tab.id); } catch {}
+        reject(err);
+      }
+    });
+  });
+}
+
+/**
+ * Waits for an already-in-progress dedicated tab creation to complete.
+ * Polls every 200ms up to 30s for mcpDedicatedTabId to be set.
+ */
+async function waitForExistingDedicatedTab(accountDomain) {
+  const start = Date.now();
+  const timeout = 30000;
+  while (Date.now() - start < timeout) {
+    if (mcpDedicatedTabId) {
+      const tab = await validateDedicatedTab();
+      if (tab) return tab;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  // Timed out — the creating call might have failed; create a new one
+  console.warn(`[MCP Dedicated Tab] Timed out waiting for existing creation, forcing new tab`);
+  mcpDedicatedTabCreating = false;
+  return createMcpDedicatedTab(accountDomain);
+}
+
+/**
+ * Returns the domain (hostname) for a given account ID by finding a matching
+ * NetSuite tab's URL. Falls back to constructing it from the account ID.
+ */
+function getAccountDomain(accountId) {
+  // Convert account ID format (e.g. "9937091_SB1") back to subdomain format ("9937091-sb1")
+  const subdomain = accountId.toLowerCase().replace(/_/g, "-");
+  return `${subdomain}.app.netsuite.com`;
+}
+
+/**
+ * Validates the dedicated MCP tab still exists and is usable.
+ * Returns the tab if valid, null otherwise.
+ */
+async function validateDedicatedTab() {
+  if (!mcpDedicatedTabId) return null;
+
+  try {
+    const tab = await chrome.tabs.get(mcpDedicatedTabId);
+    if (!tab || !tab.url?.includes("app.netsuite.com")) {
+      // Tab was closed or navigated away
+      mcpDedicatedTabId = null;
+      mcpDedicatedTabAccountId = null;
+      return null;
+    }
+
+    // Check that the content script is still connected
+    const response = await sendMessageToTab(tab.id, {
+      action: "CHECK_CONNECTION",
+      data: {},
+      mode: "normal"
+    });
+
+    if (response?.message !== "connected") {
+      mcpDedicatedTabId = null;
+      mcpDedicatedTabAccountId = null;
+      return null;
+    }
+
+    return tab;
+  } catch {
+    mcpDedicatedTabId = null;
+    mcpDedicatedTabAccountId = null;
+    return null;
+  }
+}
+
+/**
+ * Refreshes the dedicated MCP tab to replenish governance.
+ * Reloads the tab and waits for it to finish loading.
+ */
+async function refreshDedicatedTab() {
+  if (!mcpDedicatedTabId || mcpDedicatedTabRefreshing) return;
+
+  mcpDedicatedTabRefreshing = true;
+  console.log(`[MCP Dedicated Tab] Refreshing tab ${mcpDedicatedTabId} to replenish governance`);
+
+  try {
+    chrome.tabs.reload(mcpDedicatedTabId);
+    await waitForTabComplete(mcpDedicatedTabId);
+    console.log(`[MCP Dedicated Tab] Tab ${mcpDedicatedTabId} refreshed successfully`);
+  } catch (err) {
+    console.error(`[MCP Dedicated Tab] Failed to refresh tab: ${err.message}`);
+    // Tab may have been closed — invalidate
+    mcpDedicatedTabId = null;
+    mcpDedicatedTabAccountId = null;
+  } finally {
+    mcpDedicatedTabRefreshing = false;
+  }
+}
+
+/**
+ * Checks governance on the dedicated tab and refreshes it if below threshold.
+ * Called after each MCP tool call to ensure the tab is ready for the next call.
+ */
+async function checkAndRefreshDedicatedTabGovernance() {
+  if (!mcpDedicatedTabId) return;
+
+  const remaining = await checkTabGovernance(mcpDedicatedTabId);
+  if (remaining !== -1 && remaining < MCP_GOVERNANCE_THRESHOLD) {
+    console.log(`[MCP Dedicated Tab] Governance low (${remaining} remaining), refreshing tab`);
+    await refreshDedicatedTab();
+  }
+}
+
+// Listen for tab removal to clear the dedicated tab reference
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === mcpDedicatedTabId) {
+    console.log(`[MCP Dedicated Tab] Tab ${tabId} was closed`);
+    mcpDedicatedTabId = null;
+    mcpDedicatedTabAccountId = null;
+  }
+});
+
+// Listen for account preference changes to reset the dedicated tab
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "sync") return;
+  const settingsChange = changes.magic_netsuite_settings;
+  if (!settingsChange) return;
+
+  const oldAccount = settingsChange.oldValue?.mcpPreferredAccount || "";
+  const newAccount = settingsChange.newValue?.mcpPreferredAccount || "";
+
+  if (oldAccount !== newAccount && mcpDedicatedTabId) {
+    console.log(
+      `[MCP Dedicated Tab] Account changed from "${oldAccount}" to "${newAccount}" — ` +
+      `dedicated tab ${mcpDedicatedTabId} will no longer be used`
+    );
+    // Don't close the old tab (it may be useful for other work),
+    // just stop using it as the dedicated MCP tab.
+    mcpDedicatedTabId = null;
+    mcpDedicatedTabAccountId = null;
+  }
+});
 
 // -----------------------------
 // Connection refresh — connects to every listening port in parallel
@@ -1060,8 +1320,12 @@ async function handleRequest({ requestId, method, params }) {
 
       try {
         if (name === "ping") {
+          // Include account info so agents can discover which account is targeted
+          const storageForPing = await chrome.storage.sync.get(["magic_netsuite_settings"]);
+          const pingAccount = storageForPing?.magic_netsuite_settings?.mcpPreferredAccount || null;
           const text = args.message ? `pong: ${args.message}` : "pong";
-          result = { content: [{ type: "text", text }] };
+          const accountInfo = pingAccount ? ` (account: ${pingAccount})` : "";
+          result = { content: [{ type: "text", text: text + accountInfo }] };
         } else if (name === "suiteql_get_guide") {
           result = { content: [{ type: "text", text: SUITEQL_GUIDE }] };
         } else if (name.startsWith("suiteql_")) {
@@ -1090,10 +1354,23 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteFindFolder(args);
         } else if (name === "netsuite_list_folder") {
           result = await handleNetsuiteListFolder(args);
+        } else if (name === "netsuite_get_scripts") {
+          result = await handleNetsuiteGetScripts(args);
+        } else if (name === "netsuite_get_script_files") {
+          result = await handleNetsuiteGetScriptFiles(args);
+        } else if (name === "netsuite_get_logs") {
+          result = await handleNetsuiteGetLogs(args);
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
         recordMcpUsage(name, true, null);
+
+        // After a successful tool call, check governance on the dedicated tab
+        // and refresh it if needed for the next call.
+        // Fire-and-forget — don't block the response.
+        checkAndRefreshDedicatedTabGovernance().catch((err) => {
+          console.debug(`[MCP] Post-call governance check failed: ${err.message}`);
+        });
       } catch (toolErr) {
         recordMcpUsage(name, false, toolErr.message);
         throw toolErr;
@@ -1102,7 +1379,7 @@ async function handleRequest({ requestId, method, params }) {
       throw new Error(`Unknown method: ${method}`);
     }
 
-    return { requestId, success: true, result };
+    return { requestId, success: true, result, account: mcpDedicatedTabAccountId || null };
   } catch (err) {
     // Handle non-Error throws (plain objects, strings) that have no .message
     const msg =
@@ -1700,6 +1977,106 @@ async function handleNetsuiteReadFile(args) {
 }
 
 // -----------------------------
+// Script Tool Helpers (MCP bridge)
+// -----------------------------
+
+async function handleNetsuiteGetScripts(args) {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "SCRIPTS",
+    data: {
+      scriptId: args.scriptId,
+      scriptType: args.scriptType,
+      name: args.name,
+      owner: args.owner
+    },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : "Failed to fetch scripts");
+  }
+
+  let results = response.message;
+  if (args.search && !args.scriptId && Array.isArray(results)) {
+    const term = String(args.search).toLowerCase();
+    results = results.filter(s =>
+      String(s.name ?? "").toLowerCase().includes(term) ||
+      String(s.scriptid ?? "").toLowerCase().includes(term) ||
+      String(s.owner ?? "").toLowerCase().includes(term) ||
+      String(s.scriptfile ?? "").toLowerCase().includes(term)
+    );
+  }
+
+  return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+}
+
+async function handleNetsuiteGetScriptFiles(args) {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "SCRIPT_FILES",
+    data: { scriptIds: args.scriptIds },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : "Failed to fetch script files");
+  }
+
+  return { content: [{ type: "text", text: JSON.stringify(response.message, null, 2) }] };
+}
+
+async function handleNetsuiteGetLogs(args) {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const normalizeNumericIds = (value) => {
+    if (!Array.isArray(value)) return [];
+    return value.map(v => Number(v)).filter(v => Number.isInteger(v) && v > 0);
+  };
+
+  const now = new Date();
+  const defaultStartDate = new Date(now);
+  defaultStartDate.setDate(defaultStartDate.getDate() - 7);
+  defaultStartDate.setHours(0, 0, 0, 0);
+
+  const payload = {
+    startDate: args.startDate || defaultStartDate.toISOString(),
+    endDate: args.endDate || now.toISOString(),
+    scriptIds: normalizeNumericIds(args.scriptIds),
+    deploymentIds: normalizeNumericIds(args.deploymentIds),
+    scriptTypes: args.scriptTypes || [],
+    type: args.type
+  };
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "LOGS",
+    data: payload,
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : "Failed to fetch logs");
+  }
+
+  let results = response.message;
+  if (Array.isArray(results) && results.length > 50) {
+    const total = results.length;
+    results = results.slice(0, 50);
+    results.push({ _note: `Showing 50 of ${total} logs. Narrow your date range or add type filter for more specific results.` });
+  }
+
+  return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+}
+
+// -----------------------------
 // Tab Helpers
 // -----------------------------
 
@@ -1725,9 +2102,14 @@ function extractAccountIdFromUrl(url) {
  * the content script connected (CHECK_CONNECTION), and returns the first tab
  * that matches the preferred account from settings.
  *
+ * For MCP calls, this function also manages the dedicated governance tab:
+ *  1. If a dedicated tab exists and matches the preferred account, check its
+ *     governance and refresh it if needed.
+ *  2. If the selected tab has low governance, create a dedicated tab.
+ *
  * Fallback behavior:
  *  - If no preferredAccount is set -> falls back to active tab (legacy behavior)
- *  - If preferredAccount is set but no matching connected tab -> throws error
+ *  - If preferredAccount is set but no matching connected tab -> tries dedicated tab
  */
 async function getPreferredNetsuiteTab() {
   // Read preferred account from settings
@@ -1739,14 +2121,33 @@ async function getPreferredNetsuiteTab() {
     return getActiveNetsuiteTab();
   }
 
-  // Query ALL tabs (not just active)
+  // ── Step 1: Check if we have a valid dedicated tab for this account ──
+  if (mcpDedicatedTabId && mcpDedicatedTabAccountId === preferredAccount) {
+    const dedicatedTab = await validateDedicatedTab();
+    if (dedicatedTab) {
+      // Check governance and refresh if low
+      const remaining = await checkTabGovernance(dedicatedTab.id);
+      if (remaining !== -1 && remaining < MCP_GOVERNANCE_THRESHOLD) {
+        console.log(`[MCP] Dedicated tab governance low (${remaining}), refreshing...`);
+        await refreshDedicatedTab();
+      }
+      return dedicatedTab;
+    }
+    // Dedicated tab is invalid — clear and fall through to find another
+  }
+
+  // ── Step 2: Find any existing connected tab for this account ──
   const allTabs = await chrome.tabs.query({});
   const netsuiteTabs = allTabs.filter(
     (tab) => tab.url && tab.url.includes("app.netsuite.com") && tab.id
   );
 
   if (netsuiteTabs.length === 0) {
-    throw new Error("No NetSuite tabs found in any window");
+    // No NetSuite tabs at all — create a dedicated tab
+    console.log(`[MCP] No NetSuite tabs found, creating dedicated tab for ${preferredAccount}`);
+    const domain = getAccountDomain(preferredAccount);
+    const newTab = await createMcpDedicatedTab(domain);
+    return newTab;
   }
 
   // Check connection status for each NS tab in parallel
@@ -1771,22 +2172,37 @@ async function getPreferredNetsuiteTab() {
   const connectedTabs = results.filter((r) => r.connected);
 
   if (connectedTabs.length === 0) {
-    throw new Error(
-      "No connected NetSuite tabs found. Open a NetSuite page and ensure the extension is loaded."
-    );
+    // No connected tabs — create a dedicated tab
+    console.log(`[MCP] No connected NetSuite tabs, creating dedicated tab for ${preferredAccount}`);
+    const domain = getAccountDomain(preferredAccount);
+    const newTab = await createMcpDedicatedTab(domain);
+    return newTab;
   }
 
-  // Find the first tab whose account ID matches the preferred account
+  // Find a tab matching the preferred account
   const matchingTab = connectedTabs.find((r) => r.accountId === preferredAccount);
 
   if (!matchingTab) {
-    const availableAccounts = connectedTabs
-      .map((r) => r.accountId)
-      .filter(Boolean)
-      .join(", ");
-    throw new Error(
-      `No connected tab found for account "${preferredAccount}". Available connected accounts: ${availableAccounts || "none detected"}`
+    // No matching tab — create a dedicated tab for the preferred account
+    console.log(
+      `[MCP] No tab for account "${preferredAccount}", creating dedicated tab. ` +
+      `Available: ${connectedTabs.map((r) => r.accountId).filter(Boolean).join(", ")}`
     );
+    const domain = getAccountDomain(preferredAccount);
+    const newTab = await createMcpDedicatedTab(domain);
+    return newTab;
+  }
+
+  // ── Step 3: Check governance on the matching tab ──
+  const remaining = await checkTabGovernance(matchingTab.tab.id);
+  if (remaining !== -1 && remaining < MCP_GOVERNANCE_THRESHOLD) {
+    console.log(
+      `[MCP] Tab ${matchingTab.tab.id} governance low (${remaining} remaining), ` +
+      `creating dedicated tab for ${preferredAccount}`
+    );
+    const domain = getAccountDomain(preferredAccount);
+    const newTab = await createMcpDedicatedTab(domain);
+    return newTab;
   }
 
   return matchingTab.tab;

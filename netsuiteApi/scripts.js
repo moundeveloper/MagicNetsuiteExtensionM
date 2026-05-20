@@ -1,5 +1,8 @@
-window.getScripts = async (N, { scriptId = null } = {}) => {
-  console.log("getScripts", scriptId);
+window.getScripts = async (
+  N,
+  { scriptId = null, scriptType = null, name = null, owner = null } = {}
+) => {
+  console.log("getScripts", { scriptId, scriptType, name, owner });
   const { query } = N;
 
   let sql = `
@@ -16,15 +19,37 @@ window.getScripts = async (N, { scriptId = null } = {}) => {
 		      INNER JOIN file on file.id = script.scriptfile
     `;
 
-  // Only add WHERE if scriptId is provided
+  const conditions = [];
+  const params = [];
+
   if (scriptId) {
-    sql += ` WHERE script.scriptid = ?`;
+    conditions.push("script.scriptid = ?");
+    params.push(scriptId);
+  }
+
+  if (scriptType) {
+    conditions.push("UPPER(script.scripttype) = UPPER(?)");
+    params.push(scriptType);
+  }
+
+  if (name) {
+    conditions.push("LOWER(script.name) LIKE LOWER(?)");
+    params.push(`%${name}%`);
+  }
+
+  if (owner) {
+    conditions.push("LOWER(entity.entityid) LIKE LOWER(?)");
+    params.push(`%${owner}%`);
+  }
+
+  if (conditions.length > 0) {
+    sql += ` WHERE ${conditions.join(" AND ")}`;
   }
 
   const queryConfig = { query: sql };
 
-  if (scriptId) {
-    queryConfig.params = [scriptId];
+  if (params.length > 0) {
+    queryConfig.params = params;
   }
 
   const resultSet = await query.runSuiteQL.promise(queryConfig);
