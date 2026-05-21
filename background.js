@@ -231,7 +231,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     MCP_STATUS: handleMcpStatus,
     MCP_USAGE: handleMcpUsage,
     MCP_USAGE_CLEAR: handleMcpUsageClear,
-    MCP_GET_TOOLS: handleMcpGetTools
+    MCP_GET_TOOLS: handleMcpGetTools,
+    MCP_INSTALL_INFO: handleMcpInstallInfo
   };
 
   const messageHandler = messageMap[message.type];
@@ -349,6 +350,11 @@ const handleMcpUsage = ({ sendResponse }) => {
 const handleMcpUsageClear = ({ sendResponse }) => {
   mcpUsageLog.length = 0;
   sendResponse({ ok: true });
+  return true;
+};
+
+const handleMcpInstallInfo = ({ sendResponse }) => {
+  sendResponse({ extensionId: chrome.runtime.id });
   return true;
 };
 
@@ -520,6 +526,41 @@ let mcpDedicatedTabAccountId = null;
 const MCP_GOVERNANCE_THRESHOLD = 100;
 let mcpDedicatedTabRefreshing = false;
 let mcpDedicatedTabCreating = false;
+
+// ── MCP: Direct Queries to Native Host ──
+// Allows the side panel to query the native host directly (e.g. for install path)
+// without going through the MCP client request pipeline.
+let mcpDirectQueryId = 0;
+const mcpDirectQueryPending = new Map();
+
+function queryNativeHostDirect(message) {
+  return new Promise((resolve, reject) => {
+    if (!mcpNativePort) {
+      reject(new Error("Native host not connected"));
+      return;
+    }
+    const requestId = `direct-${++mcpDirectQueryId}`;
+    const timer = setTimeout(() => {
+      mcpDirectQueryPending.delete(requestId);
+      reject(new Error("Native host query timeout"));
+    }, 5000);
+
+    const pending = {
+      resolve,
+      reject,
+      timer
+    };
+
+    mcpDirectQueryPending.set(requestId, pending);
+    try {
+      mcpNativePort.postMessage({ ...message, requestId });
+    } catch (err) {
+      mcpDirectQueryPending.delete(requestId);
+      clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
 
 // -----------------------------
 // Entry point: check settings and connect if enabled
@@ -864,6 +905,17 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // -----------------------------
 async function handleNativeBridgeMessage(port, message) {
   console.debug("[MCP Native Bridge] ←", message);
+
+  // Handle direct query responses (not MCP client pipeline)
+  if (message.type === "BASE_DIR" && message.requestId) {
+    const pending = mcpDirectQueryPending.get(message.requestId);
+    if (pending) {
+      mcpDirectQueryPending.delete(message.requestId);
+      clearTimeout(pending.timer);
+      pending.resolve(message);
+    }
+    return;
+  }
 
   const response = await handleRequest(message);
 
