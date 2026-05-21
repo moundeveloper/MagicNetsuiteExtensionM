@@ -93,8 +93,7 @@
     "*://*.netsuite.com/*",
     "downloads",
     "debugger",
-    "nativeMessaging",
-    "alarms"
+    "nativeMessaging"
   ],
   "declarative_net_request": {
     "rule_resources": [

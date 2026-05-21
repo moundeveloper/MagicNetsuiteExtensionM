@@ -302,27 +302,31 @@ const setUISource = ({ message }) => {
 // MCP MESSAGE HANDLERS
 const handleMcpConnect = ({ sendResponse }) => {
   mcpConnect().then(() => {
-    sendResponse({ status: connections.size > 0 ? "connected" : "disconnected" });
+    sendResponse({
+      status: getMcpBridgeStatus(),
+      connections: getMcpConnectionDetails(),
+      dedicatedTab: getMcpDedicatedTabInfo()
+    });
   });
   return true; // async
 };
 
 const handleMcpDisconnect = ({ sendResponse }) => {
-  mcpDisconnect();
-  sendResponse({ status: "disconnected" });
+  mcpDisconnect().then(() => {
+    sendResponse({
+      status: "disconnected",
+      connections: getMcpConnectionDetails(),
+      dedicatedTab: getMcpDedicatedTabInfo()
+    });
+  });
   return true;
 };
 
 const handleMcpStatus = ({ sendResponse }) => {
-  const connectionDetails = [...connections.entries()].map(([port, sock]) => ({
-    port,
-    state: sock.readyState === WebSocket.OPEN ? "open" : "closed"
-  }));
-  const isConnected = connectionDetails.some((c) => c.state === "open");
   sendResponse({
-    status: isConnected ? "connected" : "disconnected",
-    connections: connectionDetails,
-    dedicatedTab: mcpDedicatedTabId ? { tabId: mcpDedicatedTabId, accountId: mcpDedicatedTabAccountId } : null
+    status: getMcpBridgeStatus(),
+    connections: getMcpConnectionDetails(),
+    dedicatedTab: getMcpDedicatedTabInfo()
   });
   return true;
 };
@@ -498,19 +502,14 @@ let activeTabId = null;
 
 /* MCP SERVER */
 // background.js — Chrome Extension Service Worker
-// Connects to ALL magiNetsuiteMCPServer.js instances across ports 9700–9720 simultaneously,
-// so multiple AI harnesses can each have their own MCP server and all receive
-// extension responses in parallel.
-const PORT_RANGE_START = 9700;
-const PORT_RANGE_END = 9720;
-const MCP_RECONNECT_ALARM = "mcp-reconnect";
+// Uses Chrome Native Messaging instead of scanning localhost bridge ports.
+// Chrome starts the native host; the host owns a local named-pipe relay used by
+// any AI-facing MCP stdio process that needs to call into the extension.
+const MCP_NATIVE_HOST_NAME = "com.magicnetsuite.mcp_bridge";
 
-// Map of port → WebSocket for every active magiNetsuiteMCPServer.js connection.
-// Replacing the old single `ws` variable is the core fix: previously only
-// the first port found was connected, leaving any additional host instances
-// without an extension socket and causing "Extension not connected" errors.
-const connections = new Map();
-let isRefreshing = false;
+let mcpNativePort = null;
+let mcpNativeConnecting = false;
+let mcpNativeLastError = null;
 
 // ── MCP: Dedicated Tab for Governance ──
 // When a tab runs out of SuiteScript governance, the MCP server creates a
@@ -532,23 +531,6 @@ let mcpDedicatedTabCreating = false;
   }
 })();
 
-// Alarm-based refresh: reconnects dropped sockets AND discovers new host
-// instances that started after the extension was already connected.
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === MCP_RECONNECT_ALARM) {
-    console.log("[MCP Bridge] Alarm-based connection refresh");
-    const enabled = await isMcpEnabled();
-    if (enabled) {
-      // await is intentional: keeps the service worker alive for the full
-      // 2-second connection attempt window so ports with new host instances
-      // are not missed due to early SW termination.
-      await refreshConnections();
-    } else {
-      mcpDisconnect();
-    }
-  }
-});
-
 // -----------------------------
 // MCP enabled check
 // -----------------------------
@@ -565,27 +547,72 @@ async function isMcpEnabled() {
 // Public connect/disconnect
 // -----------------------------
 async function mcpConnect() {
-  await chrome.alarms.clear(MCP_RECONNECT_ALARM);
+  if (mcpNativePort || mcpNativeConnecting) return;
 
-  await refreshConnections();
+  mcpNativeConnecting = true;
+  mcpNativeLastError = null;
 
-  // Keep alarm running permanently while enabled:
-  // it both reconnects dropped sockets and discovers newly-started host instances.
-  // 5-second interval (periodInMinutes: 0.083) ensures a newly-started host on
-  // port 9701+ is discovered quickly instead of waiting up to 30 seconds.
-  chrome.alarms.create(MCP_RECONNECT_ALARM, { periodInMinutes: 0.083 });
+  try {
+    const port = chrome.runtime.connectNative(MCP_NATIVE_HOST_NAME);
+    mcpNativePort = port;
+
+    port.onMessage.addListener((message) => {
+      handleNativeBridgeMessage(port, message);
+    });
+
+    port.onDisconnect.addListener(() => {
+      const message = chrome.runtime.lastError?.message || null;
+      mcpNativeLastError = message;
+      console.warn("[MCP Native Bridge] disconnected", message || "");
+      if (mcpNativePort === port) {
+        mcpNativePort = null;
+      }
+    });
+
+    port.postMessage({
+      type: "extensionReady",
+      name: "Magic Netsuite",
+      version: chrome.runtime.getManifest?.().version || "unknown"
+    });
+
+    console.log("[MCP Native Bridge] connected to native host");
+  } catch (err) {
+    mcpNativePort = null;
+    mcpNativeLastError = err instanceof Error ? err.message : String(err);
+    console.error("[MCP Native Bridge] failed to connect", err);
+  } finally {
+    mcpNativeConnecting = false;
+  }
 }
 
 async function mcpDisconnect() {
-  // Await the clear so the alarm cannot fire one final time due to a race
-  await chrome.alarms.clear(MCP_RECONNECT_ALARM);
-
-  for (const [, sock] of connections) {
-    try { sock.close(); } catch {}
+  if (mcpNativePort) {
+    try { mcpNativePort.disconnect(); } catch {}
   }
-  connections.clear();
-  isRefreshing = false;
-  console.log("[MCP Bridge] Manually disconnected");
+  mcpNativePort = null;
+  mcpNativeConnecting = false;
+  console.log("[MCP Native Bridge] manually disconnected");
+}
+
+function getMcpBridgeStatus() {
+  return mcpNativePort ? "connected" : "disconnected";
+}
+
+function getMcpConnectionDetails() {
+  return [
+    {
+      id: MCP_NATIVE_HOST_NAME,
+      label: "Native host",
+      state: mcpNativePort ? "open" : "closed",
+      error: mcpNativeLastError
+    }
+  ];
+}
+
+function getMcpDedicatedTabInfo() {
+  return mcpDedicatedTabId
+    ? { tabId: mcpDedicatedTabId, accountId: mcpDedicatedTabAccountId }
+    : null;
 }
 
 // -----------------------------
@@ -833,130 +860,21 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 // -----------------------------
-// Connection refresh — connects to every listening port in parallel
+// Native host message handling
 // -----------------------------
-async function refreshConnections() {
-  if (isRefreshing) return;
-  isRefreshing = true;
+async function handleNativeBridgeMessage(port, message) {
+  console.debug("[MCP Native Bridge] ←", message);
 
-  const portsScanned = [];
-  const portsSkipped = [];
-  const portsConnected = [];
+  const response = await handleRequest(message);
 
-  const promises = [];
-  for (let port = PORT_RANGE_START; port <= PORT_RANGE_END; port++) {
-    const existing = connections.get(port);
-    if (existing && existing.readyState === WebSocket.OPEN) {
-      portsSkipped.push(port);
-      continue;
-    }
-    // Clean up stale entry if socket is no longer open
-    if (existing) connections.delete(port);
-    portsScanned.push(port);
-    promises.push(
-      tryConnect(port).then((connected) => {
-        if (connected) portsConnected.push(port);
-      })
-    );
+  console.debug("[MCP Native Bridge] →", response);
+
+  try {
+    port.postMessage(response);
+  } catch (err) {
+    mcpNativeLastError = err instanceof Error ? err.message : String(err);
+    console.error("[MCP Native Bridge] failed to post response", err);
   }
-
-  await Promise.all(promises);
-
-  console.log(
-    `[MCP Bridge] Scan complete — ` +
-    `skipped(already open): [${portsSkipped}], ` +
-    `scanned: ${portsScanned.length}, ` +
-    `new: [${portsConnected}], ` +
-    `total active: ${connections.size} (ports: ${[...connections.keys()].join(", ") || "none"})`
-  );
-
-  isRefreshing = false;
-}
-
-// -----------------------------
-// Try single port — adds to connections Map on success, returns true/false
-// -----------------------------
-function tryConnect(port) {
-  return new Promise((resolve) => {
-    const url = `ws://127.0.0.1:${port}`;
-    const sock = new WebSocket(url);
-
-    let settled = false;
-
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      // A timeout (rather than immediate refusal) means the port accepted
-      // the TCP connection but never completed the WebSocket handshake.
-      // Use debug level so it doesn't pollute the DevTools console by default.
-      console.debug(`[MCP Bridge] port ${port} WebSocket handshake timed out`);
-      try { sock.close(); } catch {}
-      resolve(false);
-    }, 2000);
-
-    sock.onopen = () => {
-      if (settled) return;
-      settled = true;
-
-      clearTimeout(timeout);
-      console.debug(`[MCP Bridge] connected on port ${port}`);
-
-      connections.set(port, sock);
-      attachHandlers(sock, port);
-
-      resolve(true);
-    };
-
-    sock.onerror = (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      // Typically "connection refused" — nothing listening on this port.
-      // Only log at debug level to keep noise down.
-      // console.debug(`[MCP Bridge] port ${port} refused`);
-      resolve(false);
-    };
-
-    sock.onclose = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolve(false);
-    };
-  });
-}
-
-// -----------------------------
-// Message handling
-// -----------------------------
-function attachHandlers(sock, port) {
-  sock.onmessage = async (event) => {
-    let msg;
-
-    try {
-      msg = JSON.parse(event.data);
-    } catch {
-      return;
-    }
-
-    console.debug("[MCP Bridge] ←", msg);
-
-    const response = await handleRequest(msg);
-
-    console.debug("[MCP Bridge] →", response);
-
-    sock.send(JSON.stringify(response));
-  };
-
-  sock.onclose = () => {
-    console.warn(`[MCP Bridge] disconnected from port ${port}`);
-    connections.delete(port);
-    // The alarm will reconnect and discover new hosts — no manual reschedule needed.
-  };
-
-  sock.onerror = (err) => {
-    console.error(`[MCP Bridge] error on port ${port}`, err);
-  };
 }
 
 // -----------------------------
