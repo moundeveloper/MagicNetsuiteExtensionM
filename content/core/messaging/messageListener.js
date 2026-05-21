@@ -10,6 +10,144 @@ import { scrapeSuiteScriptModules } from "../../modules/suiteScriptScraper.js";
 const requestManager = new RequestManager();
 
 const SCRAPE_ACTION = "SCRAPE_SUITESCRIPT_MODULES";
+const MAX_DOC_LINKS = 200;
+
+const SKIP_DOC_TEXT_TAGS = new Set(["script", "style", "noscript", "svg"]);
+const BLOCK_DOC_TEXT_TAGS = new Set([
+  "article", "aside", "blockquote", "div", "dl", "fieldset", "figure", "footer",
+  "form", "header", "main", "nav", "ol", "p", "section", "table", "ul"
+]);
+const HEADING_DOC_TEXT_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+
+const normalizeDocWhitespace = (text) =>
+  text
+    .replace(/\r/g, "")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+const escapeMarkdownLinkText = (text) =>
+  text.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+
+const toAbsoluteDocUrl = (href, pageUrl) => {
+  const raw = String(href ?? "").trim();
+  if (!raw) return "";
+
+  const lower = raw.toLowerCase();
+  if (lower.startsWith("javascript:") || lower.startsWith("mailto:") || lower.startsWith("tel:")) {
+    return "";
+  }
+
+  try {
+    const absolute = new URL(raw, pageUrl).href;
+    return absolute.startsWith("http://") || absolute.startsWith("https://") ? absolute : "";
+  } catch {
+    return "";
+  }
+};
+
+const getNearestDocHeading = (element) => {
+  let current = element;
+  while (current) {
+    let sibling = current.previousElementSibling;
+    while (sibling) {
+      if (HEADING_DOC_TEXT_TAGS.has(sibling.tagName.toLowerCase())) {
+        return normalizeDocWhitespace(sibling.textContent ?? "");
+      }
+      const nestedHeadings = Array.from(sibling.querySelectorAll("h1,h2,h3,h4,h5,h6"));
+      const heading = nestedHeadings[nestedHeadings.length - 1];
+      if (heading) return normalizeDocWhitespace(heading.textContent ?? "");
+      sibling = sibling.previousElementSibling;
+    }
+    current = current.parentElement;
+  }
+  return "";
+};
+
+const extractHelpPageContent = (root, pageUrl) => {
+  const links = [];
+  const seenLinks = new Set();
+
+  const addLink = (anchor, text, url) => {
+    if (!url) return;
+    const normalizedText = normalizeDocWhitespace(text) || url;
+    const key = `${normalizedText}\n${url}`;
+    if (seenLinks.has(key)) return;
+    seenLinks.add(key);
+
+    if (links.length < MAX_DOC_LINKS) {
+      const section = getNearestDocHeading(anchor);
+      links.push({
+        text: normalizedText,
+        url,
+        ...(section ? { section } : {})
+      });
+    }
+  };
+
+  const serializeChildren = (element) =>
+    Array.from(element.childNodes).map(serializeNode).join("");
+
+  const serializeNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return (node.textContent ?? "").replace(/\s+/g, " ");
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+    const element = node;
+    const tagName = element.tagName.toLowerCase();
+    if (SKIP_DOC_TEXT_TAGS.has(tagName)) return "";
+
+    if (tagName === "br") return "\n";
+
+    if (tagName === "a") {
+      const text = normalizeDocWhitespace(serializeChildren(element) || element.textContent || "");
+      const absoluteUrl = toAbsoluteDocUrl(element.getAttribute("href"), pageUrl);
+      if (!absoluteUrl) return text;
+
+      addLink(element, text, absoluteUrl);
+      return `[${escapeMarkdownLinkText(text || absoluteUrl)}](${absoluteUrl})`;
+    }
+
+    if (tagName === "pre") {
+      return `\n\n${(element.textContent ?? "").trim()}\n\n`;
+    }
+
+    if (tagName === "code") {
+      return `\`${normalizeDocWhitespace(element.textContent ?? "")}\``;
+    }
+
+    if (tagName === "li") {
+      return `\n- ${normalizeDocWhitespace(serializeChildren(element))}`;
+    }
+
+    if (tagName === "tr") {
+      const cells = Array.from(element.children)
+        .filter(child => ["td", "th"].includes(child.tagName.toLowerCase()))
+        .map(child => normalizeDocWhitespace(serializeChildren(child)))
+        .filter(Boolean);
+      return cells.length ? `\n${cells.join(" | ")}` : "";
+    }
+
+    if (HEADING_DOC_TEXT_TAGS.has(tagName)) {
+      return `\n\n${normalizeDocWhitespace(serializeChildren(element))}\n\n`;
+    }
+
+    const content = serializeChildren(element);
+    return BLOCK_DOC_TEXT_TAGS.has(tagName) ? `\n\n${content}\n\n` : content;
+  };
+
+  const content = normalizeDocWhitespace(serializeNode(root));
+
+  return {
+    content,
+    links,
+    linkCount: seenLinks.size,
+    linksTruncated: seenLinks.size > links.length
+  };
+};
 
 export const setupMessageListener = () => {
   chrome.runtime.onConnect.addListener((port) => {
@@ -92,7 +230,7 @@ export const setupMessageListener = () => {
               const anchor = titleEl.querySelector("a");
               const title = (anchor?.textContent ?? titleEl.textContent ?? "").trim();
               const href = anchor?.getAttribute("href") ?? "";
-              const fullUrl = href.startsWith("http") ? href : href ? `${baseUrl}${href}` : "";
+              const fullUrl = toAbsoluteDocUrl(href, url || baseUrl);
               const summary = (bodyEls[i]?.textContent ?? "").trim();
               if (title && fullUrl) results.push({ title, url: fullUrl, summary });
             });
@@ -103,8 +241,13 @@ export const setupMessageListener = () => {
               doc.querySelector(".nshelp_page") ??
               doc.querySelector("main") ??
               doc.body;
-            const content = (el?.textContent ?? "").trim();
-            sendResponse({ status: "ok", message: { content } });
+            const title = normalizeDocWhitespace(
+              el?.querySelector("h1")?.textContent ??
+              doc.querySelector("title")?.textContent ??
+              ""
+            );
+            const extracted = extractHelpPageContent(el, url);
+            sendResponse({ status: "ok", message: { title, ...extracted } });
           }
         })
         .catch(e => sendResponse({ status: "error", message: String(e?.message ?? e) }));

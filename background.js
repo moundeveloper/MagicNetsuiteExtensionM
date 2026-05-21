@@ -996,13 +996,13 @@ const MCP_TOOL_DEFINITIONS = [
   {
     name: "netsuite_read_doc_page",
     description:
-      "Read the full text content of a NetSuite documentation page. Pass a URL returned by 'netsuite_search_docs'. Returns the page's main text (up to 10 000 characters). Always include a References section with the page URL in your response after reading.",
+      "Read a NetSuite documentation page. Pass a URL returned by 'netsuite_search_docs' or a link returned by a previous 'netsuite_read_doc_page' call. Returns the page's main text (up to 10 000 characters) with inline Markdown links preserved, plus a structured links array for deeper follow-up research. Always include a References section with the page URL in your response after reading.",
     inputSchema: {
       type: "object",
       properties: {
         url: {
           type: "string",
-          description: "Full URL of the NetSuite help page (from netsuite_search_docs results)."
+          description: "Full NetSuite help center URL, either from netsuite_search_docs results or from the links array returned by netsuite_read_doc_page."
         }
       },
       required: ["url"]
@@ -1496,8 +1496,17 @@ async function handleNetsuiteSearchDocs(args) {
 
 async function handleNetsuiteReadDocPage(args) {
   const url = String(args.url ?? "");
-  if (!url.includes("app.netsuite.com")) {
-    throw new Error("URL must point to an app.netsuite.com help page.");
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error("url must be a valid NetSuite help page URL.");
+  }
+
+  const isNetsuiteHost = parsedUrl.hostname === "netsuite.com" || parsedUrl.hostname.endsWith(".netsuite.com");
+  const isHelpCenterPage = parsedUrl.pathname === "/app/help/helpcenter.nl";
+  if (!isNetsuiteHost || !isHelpCenterPage) {
+    throw new Error("URL must point to a NetSuite help center page.");
   }
 
   const tab = await getPreferredNetsuiteTab();
@@ -1518,10 +1527,22 @@ async function handleNetsuiteReadDocPage(args) {
   const content = response.message?.content ?? "";
   if (!content) throw new Error("Could not parse content from the page.");
 
+  const links = Array.isArray(response.message?.links) ? response.message.links : [];
+  const payload = {
+    url,
+    ...(response.message?.title ? { title: response.message.title } : {}),
+    content: content.slice(0, 10_000),
+    contentLength: content.length,
+    contentTruncated: content.length > 10_000,
+    links,
+    linkCount: response.message?.linkCount ?? links.length,
+    linksTruncated: Boolean(response.message?.linksTruncated)
+  };
+
   return {
     content: [{
       type: "text",
-      text: JSON.stringify({ url, content: content.slice(0, 10_000) }, null, 2)
+      text: JSON.stringify(payload, null, 2)
     }]
   };
 }
