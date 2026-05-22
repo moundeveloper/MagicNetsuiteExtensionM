@@ -1060,6 +1060,101 @@ const MCP_TOOL_DEFINITIONS = [
       required: ["url"]
     }
   },
+  // ── Script Tools ──
+  {
+    name: "netsuite_get_scripts",
+    description:
+      "Search and list scripts from a live NetSuite account. Returns scriptid, id, name, scripttype, owner, scriptfile. " +
+      "Supports SQL-level filtering by scriptId (exact match), scriptType, name (partial match), and owner (partial match) — these run server-side and reduce data transfer. " +
+      "Also supports a client-side 'search' parameter for fuzzy keyword matching across all fields when you don't know which field to filter on. " +
+      "Call with no parameters to list ALL scripts. Pass the numeric 'id' values to netsuite_get_script_files to read source code.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptId: {
+          type: "string",
+          description: "Exact script ID string (e.g. 'customscript_my_suitelet'). Only use when you know the full exact ID."
+        },
+        scriptType: {
+          type: "string",
+          description: "Filter by script type (e.g. 'CLIENT', 'USEREVENT', 'SCRIPTLET', 'MAPREDUCE', 'SCHEDULED', 'SUITELET', 'RESTLET', 'WORKFLOWACTION', 'PORTLET', 'BUNDLEINSTALLATION', 'MASSUPDATESCRIPT'). Case-insensitive. Filters at the SQL level."
+        },
+        name: {
+          type: "string",
+          description: "Partial script name to search for (case-insensitive LIKE match). Filters at the SQL level."
+        },
+        owner: {
+          type: "string",
+          description: "Partial owner name to filter by (case-insensitive LIKE match). Filters at the SQL level."
+        },
+        search: {
+          type: "string",
+          description: "Fuzzy client-side keyword search across name, scriptid, owner, and scriptfile (case-insensitive). Applied AFTER server-side filters."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_get_script_files",
+    description:
+      "Fetch the full source code for one or more scripts by their internal numeric IDs (the 'id' field from netsuite_get_scripts).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptIds: {
+          type: "array",
+          items: { type: "number" },
+          description: "One or more script internal numeric IDs (e.g. [523] or [523, 841])."
+        }
+      },
+      required: ["scriptIds"]
+    }
+  },
+  {
+    name: "netsuite_get_deployed_scripts",
+    description:
+      "Get all currently deployed scripts attached to a specific record type, including full source code for analysis. " +
+      "Pass a record type ID from netsuite_list_record_types, such as 'salesorder', 'customer', 'itemfulfillment', or 'customrecord_my_type'. " +
+      "Returns scriptName, scriptType, scriptId, internal numeric id, and scriptFile content for each deployed script.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recordType: {
+          type: "string",
+          description:
+            "The NetSuite record type ID. Use netsuite_list_record_types first if you do not know the exact value."
+        }
+      },
+      required: ["recordType"]
+    }
+  },
+  {
+    name: "netsuite_get_logs",
+    description:
+      "Get script execution logs from a live NetSuite account. Defaults to the last 7 days. Filter by scriptIds for targeted debugging. Focus on 'ERROR' and 'System' type logs for failures.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        startDate: {
+          type: "string",
+          description: "Start date ISO string. Defaults to 7 days ago."
+        },
+        endDate: {
+          type: "string",
+          description: "End date ISO string. Defaults to now."
+        },
+        scriptIds: {
+          type: "array",
+          items: { type: "number" },
+          description: "Filter by script internal IDs."
+        },
+        type: {
+          type: "string",
+          description: "Log type filter: 'ERROR', 'DEBUG', 'AUDIT', 'EMERGENCY', or 'System'."
+        }
+      }
+    }
+  },
   // ── Record Tools ──
   // Workflow: show/view/get any record → netsuite_load_record (directly, no other steps needed)
   //           unsure of recordType string → netsuite_list_record_types first
@@ -1328,6 +1423,8 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteGetScripts(args);
         } else if (name === "netsuite_get_script_files") {
           result = await handleNetsuiteGetScriptFiles(args);
+        } else if (name === "netsuite_get_deployed_scripts") {
+          result = await handleNetsuiteGetDeployedScripts(args);
         } else if (name === "netsuite_get_logs") {
           result = await handleNetsuiteGetLogs(args);
         } else {
@@ -2021,6 +2118,33 @@ async function handleNetsuiteGetScriptFiles(args) {
   }
 
   return { content: [{ type: "text", text: JSON.stringify(response.message, null, 2) }] };
+}
+
+async function handleNetsuiteGetDeployedScripts(args) {
+  const recordType = String(args.recordType ?? "").trim();
+  if (!recordType) throw new Error("recordType is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "SCRIPTS_DEPLOYED",
+    data: { recordType },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : `Failed to fetch deployed scripts for ${recordType}`);
+  }
+
+  const scripts = Array.isArray(response.message) ? response.message : [];
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ recordType, count: scripts.length, scripts }, null, 2)
+    }]
+  };
 }
 
 async function handleNetsuiteGetLogs(args) {

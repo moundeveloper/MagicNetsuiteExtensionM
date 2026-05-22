@@ -271,3 +271,78 @@ window.getRecordFields = (N, { type }) => {
 
   return { type, fields, sublists };
 };
+
+const createTemporaryRecord = (record, type) => {
+  try {
+    return record.create({ type });
+  } catch (error) {
+    const enumKey = String(type)
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .replace(/[^A-Za-z0-9]+/g, "_")
+      .toUpperCase();
+    const enumType = record.Type?.[enumKey];
+
+    if (enumType && enumType !== type) {
+      return record.create({ type: enumType });
+    }
+
+    throw error;
+  }
+};
+
+const readFieldProperty = (field, property) => {
+  try {
+    const value = field?.[property];
+    if (value === null || value === undefined) return "";
+    return typeof value === "string" ? value : String(value);
+  } catch {
+    return "";
+  }
+};
+
+/**
+ * Get NetSuite runtime field metadata for a record type by creating a temporary
+ * record and reading each field through Record.getField(). This exposes
+ * Field.type, which can differ from SuiteQL Records Catalog labels.
+ *
+ * @param {object} N - NetSuite modules (must expose N.record)
+ * @param {object} options
+ * @param {string} options.type - Record type (e.g. 'salesorder', 'customer')
+ * @param {string[]|null} [options.fieldIds] - Optional body fields to inspect
+ * @returns {{ type: string, fields: Record<string, { id: string, label: string, type: string, error?: string }> }}
+ */
+window.getRecordFieldTypes = (N, { type, fieldIds = null }) => {
+  if (!type) throw new Error("type is required");
+
+  const { record } = N;
+  const tempRec = createTemporaryRecord(record, type);
+  const targetFields =
+    Array.isArray(fieldIds) && fieldIds.length > 0
+      ? fieldIds
+      : tempRec.getFields();
+
+  const fields = {};
+  for (const fieldId of targetFields) {
+    const normalizedFieldId = String(fieldId);
+    try {
+      const field = tempRec.getField({ fieldId: normalizedFieldId });
+      fields[normalizedFieldId] = {
+        id: normalizedFieldId,
+        label: readFieldProperty(field, "label"),
+        type: readFieldProperty(field, "type")
+      };
+    } catch (error) {
+      fields[normalizedFieldId] = {
+        id: normalizedFieldId,
+        label: "",
+        type: "",
+        error:
+          error && typeof error.message === "string"
+            ? error.message
+            : String(error)
+      };
+    }
+  }
+
+  return { type, fields };
+};

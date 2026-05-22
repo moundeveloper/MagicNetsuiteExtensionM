@@ -402,6 +402,10 @@ const handlers = {
     console.log("Get Record Fields action received", { type });
     return window.getRecordFields(modules, { type });
   },
+  GET_RECORD_FIELD_TYPES: async ({ modules, payload: { type, fieldIds } }) => {
+    console.log("Get Record Field Types action received", { type, fieldIds });
+    return window.getRecordFieldTypes(modules, { type, fieldIds });
+  },
   FIND_FOLDER: async ({ modules, payload: { id, name } }) => {
     console.log("Find Folder action received", { id, name });
     if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
