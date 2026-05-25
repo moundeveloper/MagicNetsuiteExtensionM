@@ -540,7 +540,22 @@ const handlers = {
     const whereClause = conditions.length === 1 ? conditions[0] : `(${conditions.join(" OR ")})`;
     const sql = `SELECT id, name, folder, filesize, filetype, url FROM file WHERE ${whereClause} AND ROWNUM <= 25`;
     const files = await window.runSuiteQLQuery(modules, sql, 25);
-    return { count: files.length, files };
+    const results = Array.isArray(files) ? files : (files?.results ?? []);
+    const totalCount = Array.isArray(files)
+      ? results.length
+      : (files?.totalCount ?? results.length);
+    return {
+      count: totalCount,
+      files,
+      ...(
+        id && !name && totalCount === 0
+          ? {
+              hint:
+                "No File Cabinet file has that internal ID. If this number came from a lead/customer/entity/transaction request, it is a record ID; use SuiteQL relationship discovery to find the linked file ID."
+            }
+          : {}
+      )
+    };
   },
   LIST_FOLDER: async ({ modules, payload: { folderId } }) => {
     console.log("List Folder action received", { folderId });
