@@ -22,7 +22,7 @@
     },
     "default_title": "Magic Netsuite"
   },
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["*://*.app.netsuite.com/*"],
   "commands": {
     "toggle_extension_ui": {
       "suggested_key": {
@@ -69,30 +69,24 @@
         "content/modules/*.js",
         "globalUtils.js"
       ],
-      "matches": ["<all_urls>"]
+      "matches": ["*://*.app.netsuite.com/*"]
     }
   ],
   "content_scripts": [
     {
-      "matches": ["*://*.netsuite.com/*"],
+      "matches": ["*://*.app.netsuite.com/*"],
       "js": ["content/content.js"],
       "run_at": "document_idle"
     }
   ],
   "permissions": [
     "sidePanel",
-    "scripting",
     "clipboardWrite",
     "tabs",
-    "webRequest",
-    "cookies",
     "storage",
     "activeTab",
-    "webRequestBlocking",
     "declarativeNetRequest",
-    "*://*.netsuite.com/*",
-    "downloads",
-    "debugger",
+    "*://*.app.netsuite.com/*",
     "nativeMessaging"
   ],
   "declarative_net_request": {

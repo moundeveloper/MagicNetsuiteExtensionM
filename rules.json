@@ -13,7 +13,7 @@
       ]
     },
     "condition": {
-      "urlFilter": "*://*.netsuite.com/*",
+      "urlFilter": "*://*.app.netsuite.com/*",
       "resourceTypes": ["xmlhttprequest", "script", "other"]
     }
   }
