@@ -45,12 +45,10 @@ export const createDock = async () => {
     "/app/setup/mainsetup.nl"
   );
   const isCustomizationPage = window.location.href.includes("sc=-90");
-  const isTempTab = new URLSearchParams(window.location.search).get("tempTab") === "true";
-  const route = isTempTab ? "/processing" : "";
 
   if (injectAllowed && isCustomizationPage) {
     dock.style.display = "block";
-    injectUI(route);
+    injectUI();
 
     document.head.appendChild(style);
     document.body.appendChild(dock);
@@ -62,8 +60,8 @@ export const createDock = async () => {
     const { magic_netsuite_settings: magicNetsuiteSettings } =
       (await chrome.storage.sync.get(["magic_netsuite_settings"])) || {};
 
-    if (isTempTab || magicNetsuiteSettings.openOnCustomizationPage) {
-      console.log("[initMagicNetsuiteSettings] openOnCustomizationPage (or tempTab)");
+    if (magicNetsuiteSettings.openOnCustomizationPage) {
+      console.log("[initMagicNetsuiteSettings] openOnCustomizationPage");
       checkbox.checked = true;
       showUI();
     } else {

@@ -1,14 +1,128 @@
 console.log("netsuiteApi");
 
-const loadNetsuiteApi = async () => {
-  return new Promise((resolve, reject) => {
-    if (typeof require === "undefined") return resolve(null);
+const NETSUITE_REQUIRE_TIMEOUT_MS = 5000;
+const NETSUITE_RUNTIME_SCRIPTS = [
+  "/assets/suitescript_nsrequire/147491859.js",
+  "/assets/suitescript_bootstrap/1633197298.js",
+  "/assets/suitescript_event/2156200013.js"
+];
+const NETSUITE_RUNTIME_PARALLEL_SCRIPTS = [
+  "/javascript/suitescript/2.1/client/N.js",
+  "/javascript/suitescript/ts/bundle/NU-bundle.js"
+];
 
-    require(["N"], (NModule) => {
-      N = NModule;
-      resolve(N);
-    });
+const netsuiteRuntimeScriptLoads = new Map();
+let netsuiteRuntimeLoadPromise = null;
+let cachedNetsuiteApi = null;
+
+const getNetsuiteRuntimeQuery = () => {
+  const buildVersion =
+    location.search.match(/[?&]buildver=(\d+)/)?.[1] || "30054";
+  return `NS_VER=2026.1&minver=14&buildver=${buildVersion}`;
+};
+
+const getAmdRequire = () => {
+  if (typeof require === "function") return require;
+  if (typeof window.require === "function") return window.require;
+  return null;
+};
+
+const requireNModule = () => {
+  return new Promise((resolve) => {
+    const amdRequire = getAmdRequire();
+    if (!amdRequire) {
+      resolve(null);
+      return;
+    }
+
+    let settled = false;
+    const finish = (module) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(module || null);
+    };
+
+    const timer = setTimeout(() => finish(null), NETSUITE_REQUIRE_TIMEOUT_MS);
+
+    try {
+      amdRequire(
+        ["N"],
+        (NModule) => finish(NModule),
+        (err) => {
+          console.warn('[Magic Netsuite] require(["N"]) failed', err);
+          finish(null);
+        }
+      );
+    } catch (err) {
+      console.warn('[Magic Netsuite] require(["N"]) threw', err);
+      finish(null);
+    }
   });
+};
+
+const loadNetsuiteRuntimeScript = (src, query) => {
+  const cacheKey = `${src}?${query}`;
+  if (netsuiteRuntimeScriptLoads.has(cacheKey)) {
+    return netsuiteRuntimeScriptLoads.get(cacheKey);
+  }
+
+  const loadPromise = new Promise((resolve) => {
+    const script = document.createElement("script");
+    script.src = cacheKey;
+    script.dataset.magicNetsuiteRuntime = src;
+    script.onload = () => resolve();
+    script.onerror = (err) => {
+      console.warn(`[Magic Netsuite] Failed to load ${src}`, err);
+      resolve();
+    };
+    (document.head || document.documentElement).appendChild(script);
+  });
+
+  netsuiteRuntimeScriptLoads.set(cacheKey, loadPromise);
+  return loadPromise;
+};
+
+const ensureNetsuiteRuntimeLoaded = () => {
+  if (!netsuiteRuntimeLoadPromise) {
+    netsuiteRuntimeLoadPromise = (async () => {
+      const query = getNetsuiteRuntimeQuery();
+
+      for (const script of NETSUITE_RUNTIME_SCRIPTS) {
+        await loadNetsuiteRuntimeScript(script, query);
+      }
+
+      await Promise.all(
+        NETSUITE_RUNTIME_PARALLEL_SCRIPTS.map((script) =>
+          loadNetsuiteRuntimeScript(script, query)
+        )
+      );
+    })();
+  }
+
+  return netsuiteRuntimeLoadPromise;
+};
+
+const loadNetsuiteApi = async () => {
+  if (cachedNetsuiteApi) return cachedNetsuiteApi;
+
+  const existingModule = await requireNModule();
+  if (existingModule) {
+    cachedNetsuiteApi = existingModule;
+    window.N = existingModule;
+    return cachedNetsuiteApi;
+  }
+
+  console.log("[Magic Netsuite] SuiteScript runtime not present; loading it in-page");
+  await ensureNetsuiteRuntimeLoaded();
+
+  const loadedModule = await requireNModule();
+  if (loadedModule) {
+    cachedNetsuiteApi = loadedModule;
+    window.N = loadedModule;
+  }
+
+  return cachedNetsuiteApi;
 };
 
 // Central listener for messages from the extension
