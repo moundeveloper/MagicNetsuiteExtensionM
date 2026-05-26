@@ -202,6 +202,98 @@ window.loadRecordById = (N, { type, id, bodyOnly = false }) => {
   return { id: String(rec.id), type: rec.type, body, sublists };
 };
 
+const HARNESS_SKIP_FIELD_IDS = new Set([
+  "_csrf",
+  "custpage_cs_msgs",
+  "custpage_ctk_download",
+  "custpage_hide_column_edit",
+  "billingaddress2_set",
+  "shippingaddress2_set",
+  "entryformquerystring"
+]);
+
+const extractToJsonFieldValue = (fieldObj) => {
+  if (fieldObj === null || fieldObj === undefined) {
+    return { value: null, text: null };
+  }
+  if (typeof fieldObj !== "object") {
+    return { value: fieldObj, text: fieldObj };
+  }
+  const value =
+    fieldObj.legacyStringValue ??
+    fieldObj.value ??
+    fieldObj.text ??
+    null;
+  return { value, text: value };
+};
+
+const shouldSkipHarnessField = (fieldId, display) => {
+  if (HARNESS_SKIP_FIELD_IDS.has(fieldId)) return true;
+  if (fieldId.startsWith("custpage_")) return true;
+  if (typeof display !== "string") return false;
+  if (display.includes("<script") || display.includes("javascript:void")) return true;
+  if (display.length > 4000) return true;
+  return false;
+};
+
+const normalizeToJsonSublistRows = (sublistData) => {
+  if (!sublistData || typeof sublistData !== "object") return [];
+
+  const rows = [];
+  for (const [lineKey, lineData] of Object.entries(sublistData)) {
+    if (lineKey === "currentline" || !/^line\s+\d+$/i.test(lineKey)) continue;
+    if (!lineData || typeof lineData !== "object") continue;
+
+    const row = {};
+    for (const [fieldId, fieldObj] of Object.entries(lineData)) {
+      const normalized = extractToJsonFieldValue(fieldObj);
+      const display = normalized.text ?? normalized.value;
+      if (display === null || display === undefined || display === "") continue;
+      row[fieldId] = normalized;
+    }
+    if (Object.keys(row).length > 0) rows.push(row);
+  }
+  return rows;
+};
+
+/**
+ * Fast record load via record.load().toJSON() — used by the agent harness prefetch.
+ * Normalizes to the same { id, type, body, sublists } shape as loadRecordById so
+ * consumers can treat both paths consistently. MCP / netsuite_load_record keeps
+ * the slower getValue/getText path (bodyOnly).
+ */
+window.loadRecordByIdToJson = (N, { type, id, includeSublists = true }) => {
+  const { record } = N;
+  const rec = record.load({ type, id });
+  const json =
+    typeof rec.toJSON === "function" ? rec.toJSON() : { fields: {}, sublists: {} };
+
+  const body = {};
+  const fields = json.fields || {};
+  for (const [fieldId, fieldData] of Object.entries(fields)) {
+    const normalized = extractToJsonFieldValue(fieldData);
+    const display = normalized.text ?? normalized.value;
+    if (display === null || display === undefined || display === "") continue;
+    if (shouldSkipHarnessField(fieldId, display == null ? "" : String(display))) continue;
+    body[fieldId] = normalized;
+  }
+
+  const sublists = {};
+  if (includeSublists && json.sublists && typeof json.sublists === "object") {
+    for (const [sublistId, sublistData] of Object.entries(json.sublists)) {
+      const rows = normalizeToJsonSublistRows(sublistData);
+      if (rows.length > 0) sublists[sublistId] = rows;
+    }
+  }
+
+  return {
+    id: String(json.id ?? rec.id),
+    type: String(json.type ?? rec.type ?? type),
+    body,
+    sublists
+  };
+};
+
 /**
  * Load a record's sublist rows only — no body fields.
  * Useful when the body is already known and only line-item data is needed.

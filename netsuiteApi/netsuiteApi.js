@@ -508,6 +508,14 @@ const handlers = {
     console.log("Load Record (body only) action received", { type, id });
     return window.loadRecordById(modules, { type, id, bodyOnly: true });
   },
+  LOAD_RECORD_JSON: async ({ modules, payload: { type, id, includeSublists } }) => {
+    console.log("Load Record (toJSON) action received", { type, id, includeSublists });
+    return window.loadRecordByIdToJson(modules, {
+      type,
+      id,
+      includeSublists: includeSublists !== false
+    });
+  },
   LOAD_RECORD_SUBLISTS: async ({ modules, payload: { type, id, sublistIds } }) => {
     console.log("Load Record Sublists action received", { type, id, sublistIds });
     return window.loadRecordSublists(modules, { type, id, sublistIds: sublistIds ?? null });
