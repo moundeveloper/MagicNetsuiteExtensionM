@@ -342,18 +342,43 @@ window.getScriptDeploymentUrl = async (N, { deployment }) => {
   return scriptUrl;
 };
 
-window.getSuiteletUrl = async (N, { script, deployment }) => {
+window.getSuiteletUrl = async (
+  N,
+  { script, deployment, returnExternalUrl = false, iframe = false }
+) => {
   const { url } = N;
-  const suiteletUrl =
-    "https://" +
-    url.resolveDomain({ hostType: url.HostType.APPLICATION }) +
-    url.resolveScript({
-      scriptId: script,
-      deploymentId: deployment,
-      returnExternalUrl: false
-    });
-  console.log("Suitelet URL:", suiteletUrl);
-  return suiteletUrl;
+  const resolvedScriptUrl = url.resolveScript({
+    scriptId: script,
+    deploymentId: deployment,
+    returnExternalUrl
+  });
+  const suiteletUrl = /^https?:\/\//i.test(resolvedScriptUrl)
+    ? resolvedScriptUrl
+    : "https://" +
+      url.resolveDomain({ hostType: url.HostType.APPLICATION }) +
+      resolvedScriptUrl;
+  const suiteletUrlForContext = iframe
+    ? appendQueryParams(suiteletUrl, {
+        ifrmcntnr: "T",
+        popup: "T",
+        whence: ""
+      })
+    : suiteletUrl;
+  console.log("Suitelet URL:", suiteletUrlForContext);
+  return suiteletUrlForContext;
+};
+
+const appendQueryParams = (targetUrl, params) => {
+  const [baseUrl, hash = ""] = String(targetUrl).split("#", 2);
+  const [path, query = ""] = baseUrl.split("?", 2);
+  const searchParams = new URLSearchParams(query);
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (!searchParams.has(key)) searchParams.set(key, value);
+  });
+
+  const nextUrl = `${path}?${searchParams.toString()}`;
+  return hash ? `${nextUrl}#${hash}` : nextUrl;
 };
 
 window.saveScriptlet = async (

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Magic Netsuite",
-  "version": "1.0",
+  "version": "1.0.1",
   "description": "Make netsuite work like magic",
   "background": {
     "service_worker": "background.js"
@@ -81,6 +81,19 @@
       "matches": ["*://*.app.netsuite.com/*"],
       "js": ["content/content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.app.netsuite.com/app/site/hosting/scriptlet.nl*"],
+      "js": ["content/suiteletIframeBridge.js"],
+      "all_frames": true,
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://*.app.netsuite.com/app/site/hosting/scriptlet.nl*"],
+      "js": ["content/suiteletIframePatch.js"],
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
   "permissions": [

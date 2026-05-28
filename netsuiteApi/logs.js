@@ -26,23 +26,6 @@ window.getLogsByTime = async (
     return format.format({ value: date, type: format.Type.DATE });
   };
 
-  // Date filters
-  if (startDate && endDate) {
-    filters.push([
-      "date",
-      "between",
-      formatDateSearch(startDate),
-      formatDateSearch(endDate)
-    ]);
-  } else if (startDate) {
-    filters.push(["date", "onorafter", formatDateSearch(startDate)]);
-  } else if (endDate) {
-    filters.push(["date", "onorbefore", formatDateSearch(endDate)]);
-  } else {
-    filters.push(["date", "within", "today"]);
-  }
-
-  // Time filters
   const startTime = startDate ? dateToMinutes(startDate) : null;
   const endTime = endDate ? dateToMinutes(endDate) : null;
 
@@ -51,35 +34,87 @@ window.getLogsByTime = async (
   const formula =
     "formulanumeric: (TO_NUMBER(TO_CHAR({time}, 'HH24')) * 60) + TO_NUMBER(TO_CHAR({time}, 'MI'))";
 
-  if (startTime != null && endTime != null) {
+  const buildDateTimeFilter = () => {
+    if (!startDate && !endDate) return ["date", "within", "today"];
+
+    const startDateSearch = startDate ? formatDateSearch(startDate) : null;
+    const endDateSearch = endDate ? formatDateSearch(endDate) : null;
+
+    if (startDate && endDate && startDateSearch === endDateSearch) {
+      return [
+        ["date", "on", startDateSearch],
+        "AND",
+        [formula, "between", startTime, endTime]
+      ];
+    }
+
+    if (startDate && endDate) {
+      return [
+        [
+          ["date", "after", startDateSearch],
+          "AND",
+          ["date", "before", endDateSearch]
+        ],
+        "OR",
+        [
+          ["date", "on", startDateSearch],
+          "AND",
+          [formula, "greaterthanorequalto", startTime]
+        ],
+        "OR",
+        [
+          ["date", "on", endDateSearch],
+          "AND",
+          [formula, "lessthanorequalto", endTime]
+        ]
+      ];
+    }
+
+    if (startDate) {
+      return [
+        ["date", "after", startDateSearch],
+        "OR",
+        [
+          ["date", "on", startDateSearch],
+          "AND",
+          [formula, "greaterthanorequalto", startTime]
+        ]
+      ];
+    }
+
+    return [
+      ["date", "before", endDateSearch],
+      "OR",
+      [
+        ["date", "on", endDateSearch],
+        "AND",
+        [formula, "lessthanorequalto", endTime]
+      ]
+    ];
+  };
+
+  filters.push(buildDateTimeFilter());
+
+  const addFilter = (filter) => {
     if (filters.length > 0) filters.push("AND");
-    filters.push([formula, "between", startTime, endTime]);
-  } else if (startTime != null) {
-    if (filters.length > 0) filters.push("AND");
-    filters.push([formula, "greaterthanorequalto", startTime]);
-  } else if (endTime != null) {
-    if (filters.length > 0) filters.push("AND");
-    filters.push([formula, "lessthanorequalto", endTime]);
+    filters.push(filter);
+  };
+
+  if (type) {
+    addFilter(["type", "anyof", type]);
   }
 
   // Type filters
-  if (type) {
-    if (filters.length > 0) filters.push("AND");
-    filters.push(["type", "anyof", type]);
-  }
   if (scriptTypes.length > 0) {
-    if (filters.length > 0) filters.push("AND");
-    filters.push(["type", "anyof", scriptTypes]);
+    addFilter(["type", "anyof", scriptTypes]);
   }
 
   // Script / deployment filters
   if (scriptIds.length > 0) {
-    if (filters.length > 0) filters.push("AND");
-    filters.push(["script.internalid", "anyof", scriptIds]);
+    addFilter(["script.internalid", "anyof", scriptIds]);
   }
   if (deploymentIds.length > 0) {
-    if (filters.length > 0) filters.push("AND");
-    filters.push(["scriptdeployment.internalid", "anyof", deploymentIds]);
+    addFilter(["scriptdeployment.internalid", "anyof", deploymentIds]);
   }
 
   // Helpers

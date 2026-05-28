@@ -245,7 +245,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     MCP_USAGE: handleMcpUsage,
     MCP_USAGE_CLEAR: handleMcpUsageClear,
     MCP_GET_TOOLS: handleMcpGetTools,
-    MCP_INSTALL_INFO: handleMcpInstallInfo
+    MCP_INSTALL_INFO: handleMcpInstallInfo,
+    NETSUITE_PROXY_FETCH: proxyNetsuiteIframeFetch
   };
 
   const messageHandler = messageMap[message.type];
@@ -375,6 +376,77 @@ const handleMcpGetTools = ({ sendResponse }) => {
   // Return ALL tool definitions — the UI needs to see disabled tools too so users can re-enable them.
   const tools = MCP_TOOL_DEFINITIONS.map(({ name, description }) => ({ name, description }));
   sendResponse(tools);
+  return true;
+};
+
+const proxyNetsuiteIframeFetch = ({ message, sendResponse }) => {
+  (async () => {
+    try {
+      const { url, method = "GET", headers = {}, body = null } = message.payload || {};
+      const targetUrl = new URL(url);
+      const allowedPaths = new Set([
+        "/app/common/scripting/nlapijsonhandler.nl",
+        "/app/site/hosting/scriptlet.nl"
+      ]);
+
+      if (!/\.app\.netsuite\.com$/i.test(targetUrl.hostname)) {
+        throw new Error("Blocked proxy request outside NetSuite application domain.");
+      }
+
+      if (!allowedPaths.has(targetUrl.pathname)) {
+        throw new Error(`Blocked proxy request to unsupported path: ${targetUrl.pathname}`);
+      }
+
+      const cleanHeaders = {};
+      const forbiddenHeaders = new Set([
+        "accept-encoding",
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "origin",
+        "referer",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site"
+      ]);
+
+      Object.entries(headers || {}).forEach(([key, value]) => {
+        if (!key || value == null) return;
+        if (forbiddenHeaders.has(key.toLowerCase())) return;
+        cleanHeaders[key] = value;
+      });
+
+      const response = await fetch(targetUrl.href, {
+        method,
+        headers: cleanHeaders,
+        body: body == null ? undefined : body,
+        credentials: "include",
+        redirect: "follow"
+      });
+
+      const responseHeaders = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+
+      sendResponse({
+        ok: true,
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        headers: responseHeaders,
+        body: await response.text()
+      });
+    } catch (error) {
+      console.error("[SuiteletProxy] Request failed:", error);
+      sendResponse({
+        ok: false,
+        error: error?.message || String(error)
+      });
+    }
+  })();
+
   return true;
 };
 

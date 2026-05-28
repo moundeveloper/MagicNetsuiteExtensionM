@@ -314,19 +314,32 @@ const handlers = {
     console.log("Script Deployment URL action received");
     return window.getScriptDeploymentUrl(modules, { deployment });
   },
-  SUITELET_URL: async ({ modules, payload: { script, deployment } }) => {
+  SUITELET_URL: async ({
+    modules,
+    payload: { script, deployment, returnExternalUrl = false, iframe = false }
+  }) => {
     console.log("Open Suitelet action received");
-    return window.getSuiteletUrl(modules, { script, deployment });
+    return window.getSuiteletUrl(modules, {
+      script,
+      deployment,
+      returnExternalUrl,
+      iframe
+    });
   },
   OPEN_DEPLOYMENT_SUITELET: async ({
     modules,
-    payload: { script, deployment }
+    payload: { script, deployment, returnExternalUrl = false, iframe = false }
   }) => {
     console.log("Open Deployment Suitelet action received", {
       script,
       deployment
     });
-    return window.getSuiteletUrl(modules, { script, deployment });
+    return window.getSuiteletUrl(modules, {
+      script,
+      deployment,
+      returnExternalUrl,
+      iframe
+    });
   },
   LOGS: async ({
     modules,
