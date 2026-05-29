@@ -300,8 +300,9 @@ window.getDeployments = async (
          scriptDeployment.status, 
          scriptDeployment.loglevel,
          scriptDeployment.primarykey,
+         scriptDeployment.deploymentid,
          script.id,
-         script.name as scriptname,
+         script.name as scriptname
     FROM
         scriptdeployment
     INNER JOIN script
@@ -323,6 +324,66 @@ window.getDeployments = async (
   } catch (error) {
     log.error("Error", error);
   }
+};
+
+window.clearScriptExecutionLogs = async (
+  { url },
+  { scriptId, deploymentNumber, deploymentRecordId }
+) => {
+  const scriptRecordId = Number(scriptId);
+  const deployNumber = Number(deploymentNumber);
+
+  if (!Number.isFinite(scriptRecordId) || scriptRecordId <= 0) {
+    throw new Error("A valid script internal ID is required to clear logs.");
+  }
+
+  if (!Number.isFinite(deployNumber) || deployNumber <= 0) {
+    throw new Error("A valid deployment number is required to clear logs.");
+  }
+
+  const domain = url.resolveDomain({ hostType: url.HostType.APPLICATION });
+  const clearUrl =
+    `https://${domain}/app/common/scripting/scriptnote.nl?delete=T&id=&script=${encodeURIComponent(
+      String(deployNumber)
+    )}&scripttype=${encodeURIComponent(String(scriptRecordId))}`;
+
+  const referrer = deploymentRecordId
+    ? `https://${domain}/app/common/scripting/scriptrecord.nl?id=${encodeURIComponent(
+        String(deploymentRecordId)
+      )}`
+    : `https://${domain}/app/common/scripting/script.nl?id=${encodeURIComponent(
+        String(scriptRecordId)
+      )}`;
+
+  const response = await fetch(clearUrl, {
+    method: "GET",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      priority: "u=0, i",
+      "sec-fetch-dest": "iframe",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer
+  });
+
+  if (!response.ok) {
+    throw new Error(`NetSuite clear logs failed (${response.status})`);
+  }
+
+  await response.text();
+  return {
+    cleared: true,
+    scriptId: scriptRecordId,
+    deploymentNumber: deployNumber,
+    deploymentRecordId: deploymentRecordId ?? null
+  };
 };
 
 window.getScriptDeploymentUrl = async (N, { deployment }) => {

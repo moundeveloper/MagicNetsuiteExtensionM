@@ -90,131 +90,7 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
 };
 
 window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
-  const { query } = N;
-
-  const {
-    folderExists,
-    serverFileExists,
-    suiteletScriptExists,
-    suiteletDeployed
-  } = await window.checkMagicNetsuiteComponents({ query });
-
-  const mutation = {};
-
-  // -------------------------
-  // FOLDER
-  // -------------------------
-  if (!folderExists) {
-    const { folderId } = await window.createFolder(N, {
-      folderName: CONFIG.FOLDER_NAME,
-      parentFolderId: -15,
-      csrfToken
-    });
-
-    mutation.folderId = folderId;
-  } else {
-    // hydrate existing folder
-    const [folder] = (
-      await query.runSuiteQL.promise({
-        query: `SELECT id FROM MediaItemFolder WHERE name = ? AND parent = -15`,
-        params: [CONFIG.FOLDER_NAME]
-      })
-    ).asMappedResults();
-
-    mutation.folderId = folder?.id;
-  }
-
-  console.log("mutation", mutation);
-
-  // -------------------------
-  // FILES
-  // -------------------------
-  const files = (
-    await query.runSuiteQL.promise({
-      query: `SELECT id, name FROM file WHERE folder = ? AND name = ?`,
-      params: [mutation.folderId, CONFIG.SERVER_FILE]
-    })
-  ).asMappedResults();
-
-  console.log("files", files);
-
-  const fileMap = new Map(files.map((f) => [f.name, f.id]));
-
-  // Server file
-  if (!serverFileExists) {
-    const suiteletContent = buildSuiteletContent();
-    const serverResult = await window.uploadFile(N, {
-      fileName: CONFIG.SERVER_FILE,
-      fileContent: suiteletContent,
-      folderId: mutation.folderId,
-      csrfToken
-    });
-
-    const serverFileId = serverResult.uploaded?.[0]?.fileId;
-
-    mutation.serverFileId = serverFileId;
-  } else {
-    mutation.serverFileId = fileMap.get(CONFIG.SERVER_FILE);
-
-    // Always refresh the server file so the deployed suitelet stays current.
-    const suiteletContent = buildSuiteletContent();
-    await window.updateNetsuiteFileContent(N, {
-      fileId: mutation.serverFileId,
-      fileContent: suiteletContent,
-      fileName: CONFIG.SERVER_FILE,
-      folderId: mutation.folderId
-    });
-  }
-
-  console.log("mutation", mutation);
-
-  // -------------------------
-  // SCRIPT
-  // -------------------------
-  if (!suiteletScriptExists) {
-    const { scriptRecordId } = await window.createScriptRecord(
-      N,
-      {
-        name: CONFIG.SUITELET_SCRIPT_NAME,
-        scriptId: CONFIG.SUITELET_SCRIPT_ID,
-        fileId: mutation.serverFileId,
-        scriptType: "SCRIPTLET",
-        description:
-          "Suitelet for Magic Netsuite extension server-side script execution",
-        apiVersion: "2.1"
-      },
-      csrfToken
-    );
-
-    mutation.scriptRecordId = scriptRecordId;
-  } else {
-    const [script] = (
-      await query.runSuiteQL.promise({
-        query: `SELECT id FROM script WHERE scriptid = ?`,
-        params: [CONFIG.scriptId]
-      })
-    ).asMappedResults();
-
-    mutation.scriptRecordId = script?.id;
-  }
-
-  console.log("mutation", mutation);
-
-  // -------------------------
-  // DEPLOYMENT
-  // -------------------------
-  if (!suiteletDeployed) {
-    const { deployUrl } = await window.createScriptDeployRecord(N, {
-      name: CONFIG.SUITELET_DEPLOYMENT_NAME,
-      scriptId: CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
-      scriptInternalId: mutation.scriptRecordId,
-      title: CONFIG.SUITELET_DEPLOYMENT_NAME,
-      status: "RELEASED",
-      logLevel: "DEBUG"
-    });
-
-    mutation.deployUrl = deployUrl;
-  }
+  const mutation = await ensureMagicNetsuiteServerSuitelet(N, csrfToken);
 
   // Execute server-side script — code is passed directly in the POST body
   const execResult = await window.executeServerScript(N, {
@@ -232,6 +108,334 @@ window.runQuickScriptServer = async (N, { code, userId }, csrfToken) => {
     mutation
   };
 };
+
+window.renderFreemarkerTemplateServer = async (
+  N,
+  { template, recordType, recordId },
+  csrfToken
+) => {
+  const mutation = await ensureMagicNetsuiteServerSuitelet(N, csrfToken);
+
+  const renderResult = await window.executeFreemarkerTemplate(N, {
+    suiteletScriptId: "customscript" + CONFIG.SUITELET_SCRIPT_ID,
+    deploymentId: "customdeploy" + CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
+    deployUrl: mutation.deployUrl,
+    template,
+    recordType,
+    recordId
+  });
+
+  return {
+    success: !!renderResult?.success,
+    pdf: renderResult?.pdf || "",
+    mimeType: renderResult?.mimeType || "application/pdf",
+    error: renderResult?.error,
+    mutation
+  };
+};
+
+async function ensureMagicNetsuiteServerSuitelet(N, csrfToken) {
+  const { query } = N;
+
+  const {
+    folderExists,
+    serverFileExists,
+    suiteletScriptExists,
+    suiteletDeployed
+  } = await window.checkMagicNetsuiteComponents({ query });
+
+  const mutation = {};
+
+  if (!folderExists) {
+    const { folderId } = await window.createFolder(N, {
+      folderName: CONFIG.FOLDER_NAME,
+      parentFolderId: -15,
+      csrfToken
+    });
+
+    mutation.folderId = folderId;
+    await waitUntilMagicFolderExists(N, mutation.folderId);
+  } else {
+    const [folder] = (
+      await query.runSuiteQL.promise({
+        query: `SELECT id FROM MediaItemFolder WHERE name = ? AND parent = -15`,
+        params: [CONFIG.FOLDER_NAME]
+      })
+    ).asMappedResults();
+
+    mutation.folderId = folder?.id;
+  }
+
+  if (!mutation.folderId) {
+    throw new Error("Magic Netsuite scripts folder is not available yet");
+  }
+
+  const files = (
+    await query.runSuiteQL.promise({
+      query: `SELECT id, name FROM file WHERE folder = ? AND name = ?`,
+      params: [String(mutation.folderId), CONFIG.SERVER_FILE]
+    })
+  ).asMappedResults();
+
+  const fileMap = new Map(files.map((f) => [f.name, f.id]));
+
+  if (!serverFileExists) {
+    const serverResult = await window.uploadFile(N, {
+      fileName: CONFIG.SERVER_FILE,
+      fileContent: buildSuiteletContent(),
+      folderId: mutation.folderId,
+      csrfToken
+    });
+
+    mutation.serverFileId = serverResult.uploaded?.[0]?.fileId;
+    const serverFile = await waitUntilMagicServerFileExists(
+      N,
+      mutation.folderId
+    );
+    mutation.serverFileId = mutation.serverFileId || serverFile?.id;
+  } else {
+    mutation.serverFileId = fileMap.get(CONFIG.SERVER_FILE);
+
+    await window.updateNetsuiteFileContent(N, {
+      fileId: mutation.serverFileId,
+      fileContent: buildSuiteletContent(),
+      fileName: CONFIG.SERVER_FILE,
+      folderId: mutation.folderId
+    });
+    await waitUntilMagicServerFileExists(N, mutation.folderId);
+  }
+
+  if (!mutation.serverFileId) {
+    throw new Error("Magic Netsuite server file is not available yet");
+  }
+
+  if (!suiteletScriptExists) {
+    const { scriptRecordId } = await window.createScriptRecord(
+      N,
+      {
+        name: CONFIG.SUITELET_SCRIPT_NAME,
+        scriptId: CONFIG.SUITELET_SCRIPT_ID,
+        fileId: mutation.serverFileId,
+        scriptType: "SCRIPTLET",
+        description:
+          "Suitelet for Magic Netsuite extension server-side script execution",
+        apiVersion: "2.1"
+      },
+      csrfToken
+    );
+
+    mutation.scriptRecordId = scriptRecordId;
+    const script = await waitUntilMagicScriptExists(N);
+    mutation.scriptRecordId = mutation.scriptRecordId || script?.id;
+  } else {
+    const [script] = (
+      await query.runSuiteQL.promise({
+        query: `SELECT id FROM script WHERE scriptid = ?`,
+        params: [CONFIG.scriptId]
+      })
+    ).asMappedResults();
+
+    mutation.scriptRecordId = script?.id;
+  }
+
+  if (!mutation.scriptRecordId) {
+    throw new Error("Magic Netsuite Suitelet script is not available yet");
+  }
+
+  if (!suiteletDeployed) {
+    const { deployUrl } = await window.createScriptDeployRecord(N, {
+      name: CONFIG.SUITELET_DEPLOYMENT_NAME,
+      scriptId: CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
+      scriptInternalId: mutation.scriptRecordId,
+      title: CONFIG.SUITELET_DEPLOYMENT_NAME,
+      status: "RELEASED",
+      logLevel: "DEBUG"
+    });
+
+    mutation.deployUrl = deployUrl;
+    await waitUntilMagicDeploymentExists(N, mutation.scriptRecordId);
+  }
+
+  await waitForMagicNetsuiteServerReady(N, mutation.deployUrl);
+
+  return mutation;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function getMagicNetsuiteServerUrl(N, deployUrl) {
+  const { url } = N;
+  const domain = url.resolveDomain({
+    hostType: url.HostType.APPLICATION
+  });
+
+  const normalizeSuiteletUrl = (value) => {
+    if (!value) return "";
+
+    let normalized = String(value).trim();
+    normalized = normalized.replace(/^https\/\//i, "https://");
+    normalized = normalized.replace(/^http\/\//i, "http://");
+
+    if (/^https?:\/\//i.test(normalized)) return normalized;
+    if (normalized.startsWith("//")) return `https:${normalized}`;
+    if (!normalized.startsWith("/")) normalized = `/${normalized}`;
+
+    return `https://${domain}${normalized}`;
+  };
+
+  return normalizeSuiteletUrl(
+    deployUrl ||
+    url.resolveScript({
+      scriptId: "customscript" + CONFIG.SUITELET_SCRIPT_ID,
+      deploymentId: "customdeploy" + CONFIG.SUITELET_SCRIPT_DEPLOY_ID,
+      returnExternalUrl: false
+    })
+  );
+}
+
+async function waitForMagicNetsuiteServerReady(N, deployUrl) {
+  const fullUrl = getMagicNetsuiteServerUrl(N, deployUrl);
+  let lastError = "";
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      const response = await fetch(fullUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        body: "action=pingMagicServer",
+        credentials: "include"
+      });
+
+      if (response.ok) {
+        const text = await response.text();
+        const result = JSON.parse(text);
+        if (result?.success && result?.ready) return;
+        lastError = result?.error || text;
+      } else {
+        lastError = `HTTP ${response.status}`;
+      }
+    } catch (err) {
+      lastError = err?.message || String(err);
+    }
+
+    await sleep(750);
+  }
+
+  throw new Error(`Magic Netsuite server Suitelet is not ready yet: ${lastError}`);
+}
+
+async function waitUntilSuiteQL(
+  N,
+  queryText,
+  params,
+  predicate,
+  label,
+  timeoutMs = 10000
+) {
+  const startedAt = Date.now();
+  let lastError = "";
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const rows = (
+        await N.query.runSuiteQL.promise({
+          query: queryText,
+          params
+        })
+      ).asMappedResults();
+
+      if (predicate(rows)) return rows;
+    } catch (err) {
+      lastError = err?.message || String(err);
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error(
+    `${label} did not settle before timeout${lastError ? `: ${lastError}` : ""}`
+  );
+}
+
+async function waitUntilMagicScriptDeleted(N) {
+  await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM script WHERE scriptid = ?`,
+    [CONFIG.scriptId],
+    (rows) => rows.length === 0,
+    "Suitelet script deletion"
+  );
+}
+
+async function waitUntilMagicFolderExists(N, folderId) {
+  const [folder] = await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM MediaItemFolder WHERE id = ?`,
+    [String(folderId)],
+    (rows) => rows.length > 0,
+    "Scripts folder creation"
+  );
+
+  return folder;
+}
+
+async function waitUntilMagicServerFileExists(N, folderId) {
+  const [serverFile] = await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM file WHERE folder = ? AND name = ?`,
+    [String(folderId), CONFIG.SERVER_FILE],
+    (rows) => rows.length > 0,
+    "Server file creation"
+  );
+
+  return serverFile;
+}
+
+async function waitUntilMagicScriptExists(N) {
+  const [script] = await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM script WHERE scriptid = ?`,
+    [CONFIG.scriptId],
+    (rows) => rows.length > 0,
+    "Suitelet script creation"
+  );
+
+  return script;
+}
+
+async function waitUntilMagicDeploymentExists(N, scriptRecordId) {
+  const [deployment] = await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM scriptdeployment WHERE script = ?`,
+    [String(scriptRecordId)],
+    (rows) => rows.length > 0,
+    "Suitelet deployment creation"
+  );
+
+  return deployment;
+}
+
+async function waitUntilMagicServerFileDeleted(N, folderId) {
+  await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM file WHERE folder = ? AND name = ?`,
+    [String(folderId), CONFIG.SERVER_FILE],
+    (rows) => rows.length === 0,
+    "Server file deletion"
+  );
+}
+
+async function waitUntilMagicScriptsFolderDeleted(N, folderId) {
+  await waitUntilSuiteQL(
+    N,
+    `SELECT id FROM MediaItemFolder WHERE id = ?`,
+    [String(folderId)],
+    (rows) => rows.length === 0,
+    "Scripts folder deletion"
+  );
+}
 
 /**
  * Create a script deployment
@@ -314,17 +518,15 @@ window.executeServerScript = async (
   const { url } = N;
 
   try {
-    const suiteletUrl =
+    const fullUrl = getMagicNetsuiteServerUrl(
+      N,
       deployUrl ||
-      url.resolveScript({
-        scriptId: suiteletScriptId,
-        deploymentId: deploymentId,
-        returnExternalUrl: false
-      });
-
-    const fullUrl = `https://${url.resolveDomain({
-      hostType: url.HostType.APPLICATION
-    })}${suiteletUrl}`;
+        url.resolveScript({
+          scriptId: suiteletScriptId,
+          deploymentId: deploymentId,
+          returnExternalUrl: false
+        })
+    );
 
     const response = await fetch(fullUrl, {
       method: "POST",
@@ -347,6 +549,43 @@ window.executeServerScript = async (
     return result;
   } catch (error) {
     console.error("[executeServerScript]", error);
+    throw error;
+  }
+};
+
+window.executeFreemarkerTemplate = async (
+  N,
+  { suiteletScriptId, deploymentId, deployUrl, template, recordType, recordId }
+) => {
+  const { url } = N;
+
+  try {
+    const fullUrl = getMagicNetsuiteServerUrl(N, deployUrl);
+    const body = new URLSearchParams();
+    body.set("action", "renderFreemarker");
+    body.set("template", template);
+    if (recordType && recordId) {
+      body.set("recordType", recordType);
+      body.set("recordId", recordId);
+    }
+
+    const response = await fetch(fullUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded"
+      },
+      body: body.toString(),
+      credentials: "include"
+    });
+
+    if (!response.ok) {
+      throw new Error(`FreeMarker render failed: ${response.status}`);
+    }
+
+    const responseText = await response.text();
+    return JSON.parse(responseText);
+  } catch (error) {
+    console.error("[executeFreemarkerTemplate]", error);
     throw error;
   }
 };
@@ -385,6 +624,7 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
         },
         csrfToken
       );
+      await waitUntilMagicScriptDeleted(N);
       addStep("Suitelet Script", "removed");
     } else {
       addStep("Suitelet Script", "skipped");
@@ -408,12 +648,18 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
     return { steps };
   }
 
+  if (!folderId) {
+    addStep("Server File", "skipped");
+    addStep("Scripts Folder", "skipped");
+    return { steps };
+  }
+
   // ── Server file ──────────────────────────────────────────────────────────
   try {
     const [{ id: serverFileId } = {}] = (
       await query.runSuiteQL.promise({
         query: `SELECT id FROM file WHERE folder = ? AND name = ?`,
-        params: [folderId, CONFIG.SERVER_FILE]
+        params: [String(folderId), CONFIG.SERVER_FILE]
       })
     ).asMappedResults();
 
@@ -423,6 +669,7 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
         { fileId: serverFileId, folderId },
         csrfToken
       );
+      await waitUntilMagicServerFileDeleted(N, folderId);
       addStep("Server File", "removed");
     } else {
       addStep("Server File", "skipped");
@@ -433,12 +680,9 @@ window.removeMagicNetsuiteComponents = async (N, {}, csrfToken) => {
 
   // ── Folder ───────────────────────────────────────────────────────────────
   try {
-    if (folderId) {
-      await window.deleteFolder(N, { folderId });
-      addStep("Scripts Folder", "removed");
-    } else {
-      addStep("Scripts Folder", "skipped");
-    }
+    await window.deleteFolder(N, { folderId });
+    await waitUntilMagicScriptsFolderDeleted(N, folderId);
+    addStep("Scripts Folder", "removed");
   } catch (err) {
     addStep("Scripts Folder", "error", String(err));
   }
@@ -507,6 +751,21 @@ define(
     return { logs: __logs, result: __result };
   };
 
+  var renderFreemarkerTemplate = function(template, recordType, recordId) {
+    var renderer = render.create();
+    renderer.templateContent = template;
+    if (recordType && recordId) {
+      renderer.addRecord({
+        templateName: 'record',
+        record: record.load({
+          type: recordType,
+          id: recordId
+        })
+      });
+    }
+    return renderer.renderAsPdf();
+  };
+
   var onRequest = function(context) {
     try {
       if (context.request.method !== 'POST') {
@@ -517,6 +776,41 @@ define(
       var action = context.request.parameters.action;
       if (!action) {
         context.response.write(JSON.stringify({ success: false, error: 'Missing action parameter', logs: [] }));
+        return;
+      }
+
+      if (action === 'pingMagicServer') {
+        context.response.setHeader({ name: 'Content-Type', value: 'application/json' });
+        context.response.write(JSON.stringify({ success: true, ready: true }));
+        return;
+      }
+
+      if (action === 'renderFreemarker') {
+        var template = context.request.parameters.template;
+        if (!template) {
+          context.response.write(JSON.stringify({ success: false, error: 'Missing template parameter' }));
+          return;
+        }
+
+        try {
+          var pdfFile = renderFreemarkerTemplate(
+            template,
+            context.request.parameters.recordType,
+            context.request.parameters.recordId
+          );
+          context.response.setHeader({ name: 'Content-Type', value: 'application/json' });
+          context.response.write(JSON.stringify({
+            success: true,
+            mimeType: 'application/pdf',
+            pdf: pdfFile.getContents()
+          }));
+        } catch (renderError) {
+          context.response.setHeader({ name: 'Content-Type', value: 'application/json' });
+          context.response.write(JSON.stringify({
+            success: false,
+            error: renderError.message || String(renderError)
+          }));
+        }
         return;
       }
 
