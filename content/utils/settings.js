@@ -13,6 +13,8 @@ export const initMagicNetsuiteSettings = async () => {
   const settings = {
     extensionToggle: "Alt+Shift+U",
     drawerOpen: "ctrl+k",
+    modulesSearch: "ctrl+m",
+    elementScreenshotShortcut: "ctrl+shift+s",
     openOnCustomizationPage: true
   };
 

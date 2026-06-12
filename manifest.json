@@ -22,7 +22,7 @@
     },
     "default_title": "Magic Netsuite"
   },
-  "host_permissions": ["*://*.app.netsuite.com/*", "https://*.supabase.co/*"],
+  "host_permissions": ["<all_urls>", "*://*.app.netsuite.com/*", "https://*.supabase.co/*"],
   "commands": {
     "toggle_extension_ui": {
       "suggested_key": {
@@ -42,6 +42,13 @@
         "default": "Ctrl+Shift+Y"
       },
       "description": "Open side panel - Custom Records view"
+    },
+    "capture_element_screenshot": {
+      "suggested_key": {
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
+      },
+      "description": "Select an element and copy its screenshot"
     }
   },
   "web_accessible_resources": [
@@ -61,6 +68,7 @@
         "netsuiteApi/exportRecord.js",
         "netsuiteApi/logs.js",
         "netsuiteApi/mediaItems.js",
+        "netsuiteApi/lists.js",
         "netsuiteApi/advancedPdfTemplates.js",
         "dist/vue-ui/*",
         "content/content_export.js",
@@ -70,6 +78,7 @@
         "content/utils/*.js",
         "content/ui/**/*.js",
         "content/keyboard/*.js",
+        "content/elementScreenshotPicker.js",
         "content/modules/*.js",
         "globalUtils.js"
       ],
@@ -83,13 +92,19 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["*://*.app.netsuite.com/app/site/hosting/scriptlet.nl*"],
+      "matches": ["<all_urls>"],
+      "js": ["content/elementScreenshotPicker.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.netsuite.com/app/site/hosting/scriptlet.nl*"],
       "js": ["content/suiteletIframeBridge.js"],
       "all_frames": true,
       "run_at": "document_start"
     },
     {
-      "matches": ["*://*.app.netsuite.com/app/site/hosting/scriptlet.nl*"],
+      "matches": ["*://*.netsuite.com/app/site/hosting/scriptlet.nl*"],
       "js": ["content/suiteletIframePatch.js"],
       "all_frames": true,
       "run_at": "document_start",
@@ -103,6 +118,7 @@
     "scripting",
     "storage",
     "activeTab",
+    "debugger",
     "declarativeNetRequest",
     "*://*.app.netsuite.com/*",
     "https://*.supabase.co/*",

@@ -136,6 +136,30 @@ const recordMcpUsage = (toolName, success, errorMsg) => {
   }
 };
 
+const CUSTOM_RECORD_FIELD_TYPE_HINTS = [
+  "CHECKBOX",
+  "CURRENCY",
+  "DATE",
+  "DATETIME",
+  "DECIMAL",
+  "DOCUMENT",
+  "EMAIL",
+  "FREEFORMTEXT",
+  "HELP",
+  "HYPERLINK",
+  "INLINEHTML",
+  "INTEGER",
+  "LIST",
+  "LONGTEXT",
+  "MULTISELECT",
+  "PASSWORD",
+  "PERCENT",
+  "PHONE",
+  "RICHTEXT",
+  "TEXTAREA",
+  "TIMEOFDAY"
+];
+
 // PORT LISTENERS
 chrome.runtime.onConnect.addListener((port) => {
   const connectPortMap = {
@@ -179,7 +203,8 @@ chrome.commands.onCommand.addListener((command) => {
   const commandMap = {
     toggle_extension_ui: togglePanel,
     open_panel_scripts: openCommandView,
-    open_panel_custom_records: openCommandView
+    open_panel_custom_records: openCommandView,
+    capture_element_screenshot: startElementScreenshotSelection
   };
 
   const commandHandler = commandMap[command];
@@ -246,7 +271,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     MCP_USAGE_CLEAR: handleMcpUsageClear,
     MCP_GET_TOOLS: handleMcpGetTools,
     MCP_INSTALL_INFO: handleMcpInstallInfo,
-    NETSUITE_PROXY_FETCH: proxyNetsuiteIframeFetch
+    NETSUITE_PROXY_FETCH: proxyNetsuiteIframeFetch,
+    START_ELEMENT_SCREENSHOT_SELECTION: startElementScreenshotSelection,
+    CAPTURE_ELEMENT_SCREENSHOT: captureElementScreenshot
   };
 
   const messageHandler = messageMap[message.type];
@@ -312,6 +339,68 @@ const setUISource = ({ message }) => {
   uiSource = message.source;
 
   return true; // True to allow Asyncronous message
+};
+
+const startElementScreenshotSelection = ({ sendResponse } = {}) => {
+  chrome.tabs.query({ active: true, currentWindow: true }, async ([tab]) => {
+    try {
+      if (!tab?.id || !/^https?:\/\//i.test(tab.url || "")) {
+        throw new Error("Open a regular web page before starting element screenshot selection.");
+      }
+
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["content/elementScreenshotPicker.js"]
+      });
+
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["content/elementScreenshotPicker.js"]
+      }).catch((error) => {
+        console.warn("[ElementScreenshot] Some frames could not receive the picker:", error);
+      });
+
+      await chrome.storage.local.set({
+        magic_netsuite_element_screenshot_request: {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          source: "background"
+        }
+      });
+
+      sendResponse?.({ ok: true });
+    } catch (error) {
+      console.error("[ElementScreenshot] Failed to start selection:", error);
+      sendResponse?.({ ok: false, error: error?.message || String(error) });
+    }
+  });
+
+  return true;
+};
+
+const captureElementScreenshot = ({ sender, sendResponse }) => {
+  const tabId = sender?.tab?.id;
+  if (!tabId) {
+    sendResponse({ ok: false, error: "No tab found for screenshot request." });
+    return true;
+  }
+
+  chrome.tabs.captureVisibleTab(
+    sender.tab.windowId,
+    { format: "png" },
+    (dataUrl) => {
+      if (chrome.runtime.lastError || !dataUrl) {
+        sendResponse({
+          ok: false,
+          error: chrome.runtime.lastError?.message || "Unable to capture visible tab."
+        });
+        return;
+      }
+
+      sendResponse({ ok: true, dataUrl });
+    }
+  );
+
+  return true;
 };
 
 // MCP MESSAGE HANDLERS
@@ -1199,6 +1288,115 @@ const MCP_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "netsuite_lists",
+    description:
+      "List NetSuite custom lists from the current account. Returns metadata only: name, internalId, and inactive status. " +
+      "Use this to discover the listId to pass to netsuite_list_items. Optional query filters by list name or internal ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Optional partial list name or internal ID filter."
+        },
+        includeInactive: {
+          type: "boolean",
+          description: "Include inactive custom lists. Defaults to false."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_list_items",
+    description:
+      "Load a NetSuite custom list and return its values from the customvalue sublist. " +
+      "Pass listId from netsuite_lists. Returns each value's internalId, display value, line number, and inactive status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        listId: {
+          type: "string",
+          description: "The custom list internal ID returned by netsuite_lists, or a valid customlist script ID when supported by NetSuite record.load."
+        },
+        includeInactive: {
+          type: "boolean",
+          description: "Include inactive list values. Defaults to false."
+        }
+      },
+      required: ["listId"]
+    }
+  },
+  {
+    name: "netsuite_create_record",
+    description:
+      "Create a NetSuite standard or custom record using SuiteScript record.create, Record.setValue, and Record.save. " +
+      "Destructive: this creates data in the account. Pass recordType and a values object mapping body field IDs to values. " +
+      "For custom records, recordType is the custom record script ID such as customrecord_my_type. This tool does not create sublist lines or subrecords.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recordType: {
+          type: "string",
+          description: "The SuiteScript record type ID, e.g. customer, task, customrecord_my_type."
+        },
+        values: {
+          type: "object",
+          description: "Body field values keyed by field ID, e.g. { \"companyname\": \"Acme\" }."
+        },
+        defaultValues: {
+          type: "object",
+          description: "Optional defaultValues passed to record.create for record types that require creation defaults."
+        },
+        isDynamic: {
+          type: "boolean",
+          description: "Create the record in dynamic mode. Defaults to false."
+        },
+        enableSourcing: {
+          type: "boolean",
+          description: "Record.save enableSourcing option. Defaults to true."
+        },
+        ignoreMandatoryFields: {
+          type: "boolean",
+          description: "Record.save ignoreMandatoryFields option. Defaults to false."
+        }
+      },
+      required: ["recordType", "values"]
+    }
+  },
+  {
+    name: "netsuite_update_record_fields",
+    description:
+      "Update body fields on an existing NetSuite record using SuiteScript record.submitFields. " +
+      "Destructive: this modifies data in the account. This is for body fields only; NetSuite does not allow submitFields to update sublist line fields or subrecords. " +
+      "Pass recordType, recordId, and a values object mapping field IDs to values.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recordType: {
+          type: "string",
+          description: "The SuiteScript record type ID, e.g. customer, salesorder, customrecord_my_type."
+        },
+        recordId: {
+          type: "string",
+          description: "Internal ID of the record to update."
+        },
+        values: {
+          type: "object",
+          description: "Body field values keyed by field ID, e.g. { \"memo\": \"Updated by MCP\" }."
+        },
+        enableSourcing: {
+          type: "boolean",
+          description: "record.submitFields enableSourcing option. Defaults to true."
+        },
+        ignoreMandatoryFields: {
+          type: "boolean",
+          description: "record.submitFields ignoreMandatoryFields option. Defaults to false."
+        }
+      },
+      required: ["recordType", "recordId", "values"]
+    }
+  },
+  {
     name: "netsuite_get_record_fields",
     description:
       "Get the list of available body fields and sublist fields for a record type, WITHOUT loading a real record. " +
@@ -1213,6 +1411,140 @@ const MCP_TOOL_DEFINITIONS = [
         }
       },
       required: ["recordType"]
+    }
+  },
+  {
+    name: "netsuite_create_custom_record_type",
+    description:
+      "Find or create a NetSuite custom record type metadata record using customrecordtype. " +
+      "If an existing custom record type matches the normalized scriptId or recordname, returns that internal ID instead of creating a duplicate. " +
+      "Set body fields with recordFields or convenience keys. The name key maps to recordname. " +
+      "The scriptId key accepts either 'customrecord_my_type' or 'my_type' and is normalized so NetSuite saves CUSTOMRECORD_MY_TYPE. " +
+      "Create fields afterward with netsuite_create_custom_record_field to avoid orphaned record types if a field save fails.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Convenience value for the custom record type recordname field."
+        },
+        scriptId: {
+          type: "string",
+          description: "Convenience value for the custom record type scriptid field. Accepts 'customrecord_my_type', 'my_type', or '_my_type'."
+        },
+        description: {
+          type: "string",
+          description: "Convenience value for the description field."
+        },
+        recordFields: {
+          type: "object",
+          description: "Additional raw fieldId-to-value pairs to set on the customrecordtype before save(). These override convenience keys."
+        },
+        customFields: {
+          type: "array",
+          description: "Deprecated and rejected by this tool. Create fields with netsuite_create_custom_record_field after the record type is saved."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_get_custom_record_field_types",
+    description:
+      "Return the available custom record field type select options from the live NetSuite account. " +
+      "Internally creates an unsaved customrecordcustomfield record and reads record.getField({ fieldId: 'fieldtype' }).getSelectOptions(...). " +
+      "Use the returned option values as the fieldType for netsuite_create_custom_record_field.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: {
+          type: "string",
+          description: "Optional text filter passed to getSelectOptions. Leave empty to list available field types."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_create_custom_record_field",
+    description:
+      "Find or create a NetSuite custom record field metadata record using customrecordcustomfield. " +
+      "If an existing field with the normalized scriptId is already attached to the custom record type, returns that internal ID instead of creating a duplicate. " +
+      "Creation uses the native NetSuite custreccustfield.nl form POST because client-side SuiteScript cannot reliably save customrecordcustomfield records. " +
+      "Call netsuite_get_custom_record_field_types first when you need valid fieldType values.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        customRecordTypeId: {
+          type: "string",
+          description: "Internal ID of the custom record type metadata record; posted as rectype."
+        },
+        customRecordTypeInternalId: {
+          type: "string",
+          description: "Alias for customRecordTypeId."
+        },
+        label: { type: "string" },
+        scriptId: {
+          type: "string",
+          description: "Convenience value for the custom field scriptid field. The form POST sends NetSuite's metadata suffix format only, e.g. '_my_field'. Passing 'custrecord_my_field' or 'my_field' is normalized to '_my_field'."
+        },
+        fieldType: {
+          type: "string",
+          examples: CUSTOM_RECORD_FIELD_TYPE_HINTS,
+          description: "Convenience value for the fieldtype field. If these hints do not match your account, call netsuite_get_custom_record_field_types and use a returned value."
+        },
+        selectRecordType: {
+          type: "string",
+          description: "Convenience value for selectrecordtype when fieldType is SELECT or MULTISELECT. Use an internal numeric ID such as a custom record type ID. Custom record script IDs like 'customrecord_my_type' are resolved to internal IDs. Negative built-in IDs are validated against netsuite_get_custom_record_select_record_types. If creating a SELECT/MULTISELECT for a custom list or record list and no valid list/record is specified, use TEXT instead; the tool defaults missing selectRecordType SELECT/MULTISELECT requests to TEXT."
+        },
+        description: { type: "string" },
+        storeValue: { type: "boolean" },
+        showInList: { type: "boolean" },
+        fieldValues: {
+          type: "object",
+          description: "Additional raw form fieldId-to-value pairs to include in the custreccustfield.nl POST. rectype is always set by the tool."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_get_custom_record_select_record_types",
+    description:
+      "Return the available List/Record selectrecordtype options for custom record SELECT and MULTISELECT fields from the live NetSuite account. " +
+      "Use one returned option value as selectRecordType for netsuite_create_custom_record_field. Do not guess negative built-in IDs. If no valid custom list or record list exists, create the field as TEXT.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: {
+          type: "string",
+          description: "Optional text filter passed to getSelectOptions. Examples: Employee, Custom List, Agent Provider."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_inspect_custom_record_field",
+    description:
+      "Load an existing NetSuite customrecordcustomfield metadata record and return its actual body field IDs, values, display text, field metadata, and fieldtype/selectrecordtype select options. " +
+      "Use this to verify how custom record fields are structured in the current account before creating or debugging fields.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        customFieldId: {
+          type: "string",
+          description: "Internal ID of a custom record field metadata record to load directly."
+        },
+        customRecordTypeId: {
+          type: "string",
+          description: "Internal ID of a custom record type. If customFieldId is omitted, the tool loads the first field on this record type or the field matching scriptId."
+        },
+        customRecordTypeInternalId: {
+          type: "string",
+          description: "Alias for customRecordTypeId."
+        },
+        scriptId: {
+          type: "string",
+          description: "Optional custom field script ID to find on customRecordTypeId, e.g. custrecord_my_field or my_field."
+        }
+      }
     }
   },
   // ── Bundle Tools ──
@@ -1321,8 +1653,8 @@ const MCP_TOOL_DEFINITIONS = [
       "Read the actual content of a NetSuite File Cabinet file by its internal ID. " +
       "ALWAYS use this tool when you have a file ID (e.g. from a SuiteQL query result or from netsuite_find_file) and the user wants to see or display the file contents. " +
       "Do NOT use a lead/customer/entity/transaction record ID as fileId. Resolve related files with SuiteQL first. " +
-      "Returns the file name, content type, and full text content (or base64 for binary files). " +
-      "Works with any text-based file: .js, .json, .xml, .csv, .html, .ftl, .txt, etc.",
+      "Returns the file name, content type, and full text content. PDFs are extracted to text by the MCP bridge when possible; other binary files may return base64. " +
+      "Works with PDFs and text-based files: .js, .json, .xml, .csv, .html, .ftl, .txt, etc.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1332,6 +1664,205 @@ const MCP_TOOL_DEFINITIONS = [
         }
       },
       required: ["fileId"]
+    }
+  },
+  {
+    name: "netsuite_suitelet_stream_start",
+    description:
+      "Start an interactive Suitelet viewer session for the MCP App. Opens the provided NetSuite Suitelet URL, or uses the preferred NetSuite tab when no URL is provided.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Optional Suitelet URL to open and stream. If omitted, the current/preferred NetSuite tab is used."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_stream_list",
+    description:
+      "List deployed Suitelets available in the preferred NetSuite account so the MCP App can open one in a hidden viewer tab.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Optional search text for Suitelet script name, script ID, or deployment ID."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_stream_frame",
+    description:
+      "Capture the latest screenshot frame for the active Suitelet viewer session.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "netsuite_suitelet_stream_input",
+    description:
+      "Send mouse, wheel, or keyboard input to the active Suitelet viewer session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        event: {
+          type: "object",
+          description: "Input event with type click, mousemove, wheel, keydown, or keyup. Mouse coordinates are normalized 0..1."
+        }
+      },
+      required: ["event"]
+    }
+  },
+  {
+    name: "netsuite_suitelet_probe_url",
+    description:
+      "Fetch a Suitelet URL from the extension with NetSuite credentials and return diagnostics such as status, final URL, frame-blocking headers, and response hints.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Suitelet URL to diagnose."
+        }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "netsuite_suitelet_fetch_html",
+    description:
+      "Fetch Suitelet HTML with NetSuite credentials so the MCP App can render it with srcdoc when direct iframe embedding is blank.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "Suitelet URL to fetch."
+        }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "netsuite_suitelet_proxy_request",
+    description:
+      "Proxy a Suitelet runtime fetch/XHR request through the Chrome extension with NetSuite credentials.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        method: { type: "string" },
+        headers: { type: "object" },
+        body: { type: "string" }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "netsuite_suitelet_control_open",
+    description:
+      "START HERE to drive a Suitelet. Opens it in a real NetSuite browser tab (foreground) and attaches the controller. This toolset is fully self-contained — do NOT use Claude-in-Chrome, tab-context, navigate, or any other browser/screenshot tools; use this family (inspect/fill/click/read/eval/screenshot) for everything. PREFERRED: pass { query: \"<suitelet name>\" } (e.g. \"CTK SuiteQL\") and the correct account URL is resolved automatically — never invent or guess a URL. Alternatively pass { scriptId, deployId } from netsuite_suitelet_stream_list, or a full scriptlet.nl url. Omit all to control the already-active NetSuite tab. Returns the controlled url+title, the matched Suitelet, alternatives, a screenshot, and a snapshot of visible interactive elements for fill/click/read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Suitelet name or keyword to look up and open (recommended, e.g. \"CTK SuiteQL\")." },
+        scriptId: { type: "string", description: "Script internal id (use with deployId)." },
+        deployId: { type: "string", description: "Deployment id (use with scriptId)." },
+        url: { type: "string", description: "Full scriptlet.nl URL (only if you already have the exact account URL)." }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_inspect",
+    description:
+      "List the visible interactive elements (inputs, textareas, selects, buttons, links) of the controlled Suitelet with stable CSS selectors and labels. Call before fill/click to discover targets.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "netsuite_suitelet_screenshot",
+    description:
+      "Capture a screenshot (image) of the controlled Suitelet tab. Use THIS to visually see the page — never use Claude-in-Chrome or other browser screenshot tools.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "netsuite_suitelet_hover",
+    description:
+      "Hover the mouse over an element in the controlled Suitelet (by CSS selector, or x/y viewport coordinates) and return a screenshot. Triggers native CSS :hover plus pointer/mouseover events, so tooltips, dropdown menus, and hover-reveal UI appear.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector of the element to hover over." },
+        x: { type: "number", description: "Viewport X coordinate (CSS px) to hover, if no selector." },
+        y: { type: "number", description: "Viewport Y coordinate (CSS px) to hover, if no selector." }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_scroll",
+    description:
+      "Scroll the controlled Suitelet (window, or a specific scrollable element by selector) and return a screenshot of the new view. Use to reveal content below the fold such as a results table. Omit args to page down; use to:\"bottom\"/\"top\", a dy pixel delta, or a selector to scroll an element into view.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to scroll into view, or the scrollable container to scroll." },
+        to: { type: "string", description: "\"top\" or \"bottom\" to jump to an edge." },
+        dy: { type: "number", description: "Vertical pixels to scroll by (positive = down). Defaults to ~600 for window." },
+        dx: { type: "number", description: "Horizontal pixels to scroll by." }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_fill",
+    description:
+      "Set the value of an input/textarea/select in the controlled Suitelet by CSS selector, firing input/change events (works with framework-bound fields).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector of the field to fill." },
+        value: { type: "string", description: "Value to set." }
+      },
+      required: ["selector"]
+    }
+  },
+  {
+    name: "netsuite_suitelet_click",
+    description:
+      "Click an element in the controlled Suitelet, either by CSS selector or by visible button/link text (e.g. \"Run Query\").",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector of the element to click." },
+        text: { type: "string", description: "Visible text of the button/link to click (used when selector is omitted)." }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_read",
+    description:
+      "Read text/value from the controlled Suitelet — a specific element by CSS selector, or the whole page body when no selector is given. Use to read query results, messages, or rendered output.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to read. Omit to read the page body text." },
+        maxLength: { type: "number", description: "Max characters to return (default 8000)." }
+      }
+    }
+  },
+  {
+    name: "netsuite_suitelet_eval",
+    description:
+      "Run a JavaScript expression or snippet in the controlled Suitelet tab and return the (JSON-serializable) result. The most flexible control primitive; prefer fill/click/read for common actions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        expression: { type: "string", description: "JavaScript expression or statements to evaluate in the page." }
+      },
+      required: ["expression"]
     }
   }
 ];
@@ -1383,12 +1914,30 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteGetBundleComponents(args);
         } else if (name === "netsuite_list_record_types") {
           result = await handleNetsuiteListRecordTypes();
+        } else if (name === "netsuite_lists") {
+          result = await handleNetsuiteLists(args);
+        } else if (name === "netsuite_list_items") {
+          result = await handleNetsuiteListItems(args);
+        } else if (name === "netsuite_create_record") {
+          result = await handleNetsuiteCreateRecord(args);
+        } else if (name === "netsuite_update_record_fields") {
+          result = await handleNetsuiteUpdateRecordFields(args);
         } else if (name === "netsuite_load_record") {
           result = await handleNetsuiteLoadRecord(args);
         } else if (name === "netsuite_get_record_sublists") {
           result = await handleNetsuiteGetRecordSublists(args);
         } else if (name === "netsuite_get_record_fields") {
           result = await handleNetsuiteGetRecordFields(args);
+        } else if (name === "netsuite_create_custom_record_type") {
+          result = await handleNetsuiteCreateCustomRecordType(args);
+        } else if (name === "netsuite_get_custom_record_field_types") {
+          result = await handleNetsuiteGetCustomRecordFieldTypes(args);
+        } else if (name === "netsuite_get_custom_record_select_record_types") {
+          result = await handleNetsuiteGetCustomRecordSelectRecordTypes(args);
+        } else if (name === "netsuite_inspect_custom_record_field") {
+          result = await handleNetsuiteInspectCustomRecordField(args);
+        } else if (name === "netsuite_create_custom_record_field") {
+          result = await handleNetsuiteCreateCustomRecordField(args);
         } else if (name === "netsuite_read_file") {
           result = await handleNetsuiteReadFile(args);
         } else if (name === "netsuite_find_file") {
@@ -1405,6 +1954,38 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteGetDeployedScripts(args);
         } else if (name === "netsuite_get_logs") {
           result = await handleNetsuiteGetLogs(args);
+        } else if (name === "netsuite_suitelet_stream_start") {
+          result = await handleSuiteletStreamStart(args);
+        } else if (name === "netsuite_suitelet_stream_list") {
+          result = await handleSuiteletStreamList(args);
+        } else if (name === "netsuite_suitelet_stream_frame") {
+          result = await handleSuiteletStreamFrame();
+        } else if (name === "netsuite_suitelet_stream_input") {
+          result = await handleSuiteletStreamInput(args);
+        } else if (name === "netsuite_suitelet_probe_url") {
+          result = await handleSuiteletProbeUrl(args);
+        } else if (name === "netsuite_suitelet_fetch_html") {
+          result = await handleSuiteletFetchHtml(args);
+        } else if (name === "netsuite_suitelet_proxy_request") {
+          result = await handleSuiteletProxyRequest(args);
+        } else if (name === "netsuite_suitelet_control_open") {
+          result = await handleSuiteletControlOpen(args);
+        } else if (name === "netsuite_suitelet_inspect") {
+          result = await handleSuiteletInspect(args);
+        } else if (name === "netsuite_suitelet_screenshot") {
+          result = await handleSuiteletScreenshot(args);
+        } else if (name === "netsuite_suitelet_scroll") {
+          result = await handleSuiteletScroll(args);
+        } else if (name === "netsuite_suitelet_hover") {
+          result = await handleSuiteletHover(args);
+        } else if (name === "netsuite_suitelet_fill") {
+          result = await handleSuiteletFill(args);
+        } else if (name === "netsuite_suitelet_click") {
+          result = await handleSuiteletClick(args);
+        } else if (name === "netsuite_suitelet_read") {
+          result = await handleSuiteletRead(args);
+        } else if (name === "netsuite_suitelet_eval") {
+          result = await handleSuiteletEval(args);
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
@@ -1413,9 +1994,11 @@ async function handleRequest({ requestId, method, params }) {
         // After a successful tool call, check governance on the dedicated tab
         // and refresh it if needed for the next call.
         // Fire-and-forget — don't block the response.
-        checkAndRefreshDedicatedTabGovernance().catch((err) => {
-          console.debug(`[MCP] Post-call governance check failed: ${err.message}`);
-        });
+        if (!name.startsWith("netsuite_suitelet_")) {
+          checkAndRefreshDedicatedTabGovernance().catch((err) => {
+            console.debug(`[MCP] Post-call governance check failed: ${err.message}`);
+          });
+        }
       } catch (toolErr) {
         recordMcpUsage(name, false, toolErr.message);
         throw toolErr;
@@ -1863,6 +2446,185 @@ async function handleNetsuiteListRecordTypes() {
   };
 }
 
+async function handleNetsuiteLists(args) {
+  const result = await callNetsuiteRoute(
+    "GET_CUSTOM_LISTS",
+    {
+      query: args?.query ?? "",
+      includeInactive: args?.includeInactive === true
+    },
+    "Failed to get custom lists."
+  );
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteListItems(args) {
+  const listId = String(args?.listId ?? "").trim();
+  if (!listId) throw new Error("listId is required.");
+
+  const result = await callNetsuiteRoute(
+    "GET_CUSTOM_LIST_ITEMS",
+    {
+      listId,
+      includeInactive: args?.includeInactive === true
+    },
+    `Failed to get custom list items for ${listId}.`
+  );
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteCreateRecord(args) {
+  const recordType = String(args?.recordType ?? args?.type ?? "").trim();
+  if (!recordType) throw new Error("recordType is required.");
+
+  const result = await callNetsuiteRoute(
+    "CREATE_RECORD",
+    {
+      ...args,
+      recordType
+    },
+    `Failed to create record ${recordType}.`
+  );
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteUpdateRecordFields(args) {
+  const recordType = String(args?.recordType ?? args?.type ?? "").trim();
+  const recordId = String(args?.recordId ?? args?.id ?? "").trim();
+  if (!recordType) throw new Error("recordType is required.");
+  if (!recordId) throw new Error("recordId is required.");
+
+  const result = await callNetsuiteRoute(
+    "UPDATE_RECORD_FIELDS",
+    {
+      ...args,
+      recordType,
+      recordId
+    },
+    `Failed to update record ${recordType}/${recordId}.`
+  );
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+function getRouteResult(response, fallbackMessage) {
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message ?? response?.error;
+    const errMsg = rawMsg
+      ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg))
+      : fallbackMessage;
+    throw new Error(errMsg);
+  }
+
+  return response.message ?? response;
+}
+
+async function callNetsuiteRoute(action, data, fallbackMessage) {
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action,
+    data,
+    mode: "normal"
+  });
+
+  return getRouteResult(response, fallbackMessage);
+}
+
+async function handleNetsuiteCreateCustomRecordType(args) {
+  const result = await callNetsuiteRoute(
+    "CREATE_CUSTOM_RECORD_TYPE",
+    args,
+    "Failed to create custom record type."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteGetCustomRecordFieldTypes(args) {
+  const result = await callNetsuiteRoute(
+    "GET_CUSTOM_RECORD_FIELD_TYPES",
+    args,
+    "Failed to get custom record field types."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteGetCustomRecordSelectRecordTypes(args) {
+  const result = await callNetsuiteRoute(
+    "GET_CUSTOM_RECORD_SELECT_RECORD_TYPES",
+    args,
+    "Failed to get custom record select record types."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteInspectCustomRecordField(args) {
+  const result = await callNetsuiteRoute(
+    "INSPECT_CUSTOM_RECORD_FIELD",
+    args,
+    "Failed to inspect custom record field."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteCreateCustomRecordField(args) {
+  const result = await callNetsuiteRoute(
+    "CREATE_CUSTOM_RECORD_FIELD",
+    args,
+    "Failed to create custom record field."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
 async function handleNetsuiteFindFile(args) {
   const { id, name } = args ?? {};
   if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
@@ -2182,6 +2944,1551 @@ async function handleNetsuiteGetLogs(args) {
   }
 
   return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+}
+
+// -----------------------------
+// Suitelet Viewer Stream Tools
+// -----------------------------
+let suiteletStreamSession = null;
+let suiteletDebuggerAttached = false;
+const SUITELET_DEBUGGER_PROTOCOL_VERSION = "1.3";
+
+function normalizeSuiteletViewerUrl(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value) return "";
+
+  const url = new URL(value);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Suitelet viewer URL must be http or https.");
+  }
+  if (!/\.netsuite\.com$/i.test(url.hostname)) {
+    throw new Error("Suitelet viewer only supports NetSuite URLs.");
+  }
+  return url.href;
+}
+
+function waitForTabLoaded(tabId, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Timed out waiting for Suitelet tab to load."));
+    }, timeoutMs);
+
+    const listener = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(tab);
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError || done) return;
+      if (tab?.status === "complete") {
+        done = true;
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(tab);
+      }
+    });
+  });
+}
+
+async function focusSuiteletStreamTab(tab) {
+  if (!tab?.id || !tab.windowId) throw new Error("Suitelet stream tab is unavailable.");
+  await chrome.windows.update(tab.windowId, { focused: true });
+  await chrome.tabs.update(tab.id, { active: true });
+}
+
+function getTabOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
+async function getSuiteletViewport(tabId) {
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        scrollX: window.scrollX || 0,
+        scrollY: window.scrollY || 0,
+        title: document.title || ""
+      })
+    });
+    return result?.result || { width: 1280, height: 720, devicePixelRatio: 1, scrollX: 0, scrollY: 0, title: "" };
+  } catch {
+    return { width: 1280, height: 720, devicePixelRatio: 1, scrollX: 0, scrollY: 0, title: "" };
+  }
+}
+
+async function ensureSuiteletDebugger(tabId) {
+  if (suiteletDebuggerAttached && suiteletStreamSession?.tabId === tabId) return;
+  await chrome.debugger.attach({ tabId }, SUITELET_DEBUGGER_PROTOCOL_VERSION);
+  suiteletDebuggerAttached = true;
+  await chrome.debugger.sendCommand({ tabId }, "Page.enable", {}).catch(() => null);
+}
+
+async function sendSuiteletDebuggerCommand(tabId, method, params) {
+  await ensureSuiteletDebugger(tabId);
+  return chrome.debugger.sendCommand({ tabId }, method, params);
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (suiteletStreamSession?.tabId === tabId) {
+    suiteletStreamSession = null;
+    suiteletDebuggerAttached = false;
+  }
+});
+
+chrome.debugger.onDetach.addListener((source) => {
+  if (suiteletStreamSession?.tabId === source.tabId) {
+    suiteletDebuggerAttached = false;
+  }
+});
+
+async function handleSuiteletStreamStart(args) {
+  const requestedUrl = normalizeSuiteletViewerUrl(args?.url);
+  const previousTabId = suiteletStreamSession?.tabId || null;
+  const openActive = args?.active === true;
+  let tab;
+
+  if (requestedUrl) {
+    tab = await chrome.tabs.create({ url: requestedUrl, active: openActive });
+    await waitForTabLoaded(tab.id).catch(() => null);
+  } else {
+    tab = await getPreferredNetsuiteTab();
+    if (!tab) throw new Error("No suitable NetSuite tab found. Open a Suitelet or pass a Suitelet URL.");
+  }
+
+  if (!tab?.id || !tab.windowId) {
+    throw new Error("Could not start Suitelet stream: no tab was available.");
+  }
+
+  const freshTab = await chrome.tabs.get(tab.id);
+  if (previousTabId && previousTabId !== tab.id && suiteletDebuggerAttached) {
+    await chrome.debugger.detach({ tabId: previousTabId }).catch(() => null);
+  }
+  suiteletStreamSession = {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    url: freshTab.url || requestedUrl,
+    startedAt: new Date().toISOString(),
+    latestFrame: null
+  };
+  suiteletDebuggerAttached = previousTabId === tab.id && suiteletDebuggerAttached;
+
+  const viewport = await getSuiteletViewport(tab.id);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: true,
+        session: suiteletStreamSession,
+        viewport
+      }, null, 2)
+    }]
+  };
+}
+
+// Shared deployed-Suitelet lookup. Returns { origin, suitelets } where each
+// suitelet carries a real, account-correct scriptlet.nl URL.
+async function querySuitelets(query) {
+  const normalized = String(query || "").trim().toLowerCase();
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const conditions = [
+    "UPPER(script.scripttype) = UPPER('SCRIPTLET')",
+    "scriptdeployment.isdeployed = 'T'"
+  ];
+
+  if (normalized) {
+    const escaped = normalized.replace(/'/g, "''");
+    const searchParts = [
+      `LOWER(script.name) LIKE LOWER('%${escaped}%')`,
+      `LOWER(script.scriptid) LIKE LOWER('%${escaped}%')`,
+      `LOWER(scriptdeployment.scriptid) LIKE LOWER('%${escaped}%')`
+    ];
+
+    if (/^\d+$/.test(normalized)) {
+      searchParts.push(`script.id = ${Number(normalized)}`);
+      searchParts.push(`scriptdeployment.deploymentid = ${Number(normalized)}`);
+    }
+
+    conditions.push(`(
+      ${searchParts.join("\n      OR ")}
+    )`);
+  }
+
+  // ROWNUM is assigned BEFORE ORDER BY in SuiteQL/Oracle, so ordering + capping in
+  // the same SELECT returns an arbitrary slice. Order in a subquery, cap outside.
+  const sql = `
+    SELECT * FROM (
+      SELECT
+        script.id AS scriptinternalid,
+        script.scriptid AS scriptscriptid,
+        script.name AS scriptname,
+        scriptdeployment.deploymentid,
+        scriptdeployment.scriptid AS deploymentscriptid,
+        scriptdeployment.status,
+        scriptdeployment.isdeployed
+      FROM scriptdeployment
+      INNER JOIN script ON scriptdeployment.script = script.id
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY script.name, scriptdeployment.deploymentid
+    ) WHERE ROWNUM <= 1000
+  `;
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "RUN_SUITEQL_QUERY",
+    data: { sql, limit: 1000 },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : "Failed to fetch Suitelets");
+  }
+
+  const origin = getTabOrigin(tab.url);
+  const rows = Array.isArray(response.message) ? response.message : (response.message?.results ?? []);
+  const suitelets = rows
+    .map((row) => {
+      const scriptId = String(row.scriptinternalid || row.scriptInternalId || row.id || "");
+      const deployId = String(row.deploymentid || row.deploymentId || "").trim();
+      const scriptName = String(row.scriptname || row.scriptName || "Suitelet");
+      const deploymentScriptId = String(row.deploymentscriptid || row.deploymentScriptId || "");
+      const scriptScriptId = String(row.scriptscriptid || row.scriptScriptId || row.scriptid || "");
+      return {
+        scriptInternalId: scriptId,
+        scriptId: scriptScriptId,
+        scriptName,
+        deploymentId: deployId,
+        deploymentScriptId,
+        status: String(row.status || ""),
+        url: origin && scriptId && deployId
+          ? `${origin}/app/site/hosting/scriptlet.nl?script=${encodeURIComponent(scriptId)}&deploy=${encodeURIComponent(deployId)}`
+          : ""
+      };
+    })
+    .filter((suitelet) => suitelet.url)
+    .slice(0, 1000);
+
+  return { origin, suitelets };
+}
+
+async function handleSuiteletStreamList(args) {
+  const { suitelets } = await querySuitelets(args?.query);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ count: suitelets.length, suitelets }, null, 2)
+    }]
+  };
+}
+
+// Resolve what to open for control: an explicit scriptlet URL, a scriptId+deployId,
+// or a name/query lookup. Never lets the caller invent a host.
+async function resolveSuiteletTarget(args) {
+  const rawUrl = String(args?.url || "").trim();
+  if (rawUrl) {
+    let parsed;
+    try { parsed = new URL(rawUrl); } catch { throw new Error(`Invalid Suitelet URL: ${rawUrl}`); }
+    if (!/\.app\.netsuite\.com$/i.test(parsed.hostname) || parsed.pathname !== "/app/site/hosting/scriptlet.nl") {
+      throw new Error(
+        `Refusing to open "${rawUrl}" — not a Suitelet (expected an <account>.app.netsuite.com/app/site/hosting/scriptlet.nl URL). ` +
+        `Pass { query: "<name>" } or { scriptId, deployId } instead and the URL will be resolved for you.`
+      );
+    }
+    return { url: parsed.href, matched: null, alternatives: [] };
+  }
+
+  const scriptId = String(args?.scriptId ?? args?.scriptInternalId ?? "").trim();
+  const deployId = String(args?.deployId ?? args?.deploymentId ?? "").trim();
+  if (/^\d+$/.test(scriptId) && /^\d+$/.test(deployId)) {
+    const tab = await getPreferredNetsuiteTab();
+    const origin = tab ? getTabOrigin(tab.url) : "";
+    if (!origin) throw new Error("No NetSuite tab open to resolve the account URL. Open a NetSuite page first.");
+    return { url: `${origin}/app/site/hosting/scriptlet.nl?script=${scriptId}&deploy=${deployId}`, matched: null, alternatives: [] };
+  }
+
+  const query = String(args?.query ?? args?.name ?? "").trim();
+  if (query) {
+    const { suitelets } = await querySuitelets(query);
+    if (!suitelets.length) throw new Error(`No deployed Suitelet matches "${query}".`);
+    return {
+      url: suitelets[0].url,
+      matched: suitelets[0],
+      alternatives: suitelets.slice(1, 6).map((s) => ({ scriptName: s.scriptName, scriptInternalId: s.scriptInternalId, deploymentId: s.deploymentId, url: s.url }))
+    };
+  }
+
+  return { url: "", matched: null, alternatives: [] }; // fall back to active tab
+}
+
+async function handleSuiteletProbeUrl(args) {
+  const rawUrl = String(args?.url || "").trim();
+  if (!rawUrl) throw new Error("url is required.");
+
+  const targetUrl = new URL(rawUrl);
+  if (!/\.netsuite\.com$/i.test(targetUrl.hostname)) {
+    throw new Error("Suitelet probe only supports NetSuite URLs.");
+  }
+
+  const response = await fetch(targetUrl.href, {
+    method: "GET",
+    credentials: "include",
+    redirect: "follow"
+  });
+
+  const headers = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+
+  const body = await response.text();
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body)?.[1]
+    ?.replace(/\s+/g, " ")
+    .trim() || "";
+  const bodyText = body
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+
+  const csp = headers["content-security-policy"] || "";
+  const xFrameOptions = headers["x-frame-options"] || "";
+  const frameBlockedByHeaders = Boolean(
+    xFrameOptions ||
+    /frame-ancestors/i.test(csp)
+  );
+  const looksLikeLogin = /login|system\.netsuite|email address|password|compid/i.test(`${title} ${bodyText}`);
+  const looksEmpty = body.trim().length < 200;
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        requestedUrl: targetUrl.href,
+        finalUrl: response.url,
+        redirected: response.redirected,
+        headers,
+        title,
+        bodyLength: body.length,
+        bodyPreview: bodyText,
+        hints: {
+          frameBlockedByHeaders,
+          xFrameOptions: xFrameOptions || null,
+          frameAncestors: /frame-ancestors([^;]+)/i.exec(csp)?.[0] || null,
+          looksLikeLogin,
+          looksEmpty
+        }
+      }, null, 2)
+    }]
+  };
+}
+
+function suiteletProxyBootstrapScript(originalUrl = "") {
+  let originalHash = "";
+  const baselineParams = {};
+  try {
+    const parsed = new URL(String(originalUrl));
+    originalHash = parsed.hash || "";
+    // Preserve the Suitelet identity params so that relative runtime requests
+    // (e.g. fetch("?action=x")) that resolve against the <base> URL and would
+    // otherwise drop script/deploy/compid don't 404.
+    ["script", "deploy", "compid"].forEach((key) => {
+      const value = parsed.searchParams.get(key);
+      if (value != null && value !== "") baselineParams[key] = value;
+    });
+  } catch {}
+  const hashScript = originalHash
+    ? `try { if (!window.location.hash) window.location.hash = ${JSON.stringify(originalHash)}; } catch (e) {}`
+    : "";
+
+  let nsOrigin = "";
+  try { nsOrigin = new URL(String(originalUrl)).origin; } catch {}
+
+  return `
+<script>
+(function magicNetsuiteSuiteletProxy() {
+  ${hashScript}
+  var BASELINE_PARAMS = ${JSON.stringify(baselineParams)};
+  var NS_BASE = ${JSON.stringify(String(originalUrl))};
+  var NS_ORIGIN = ${JSON.stringify(nsOrigin)};
+  var EMBED_PARAMS = { ifrmcntnr: "T", popup: "T", whence: "" };
+  var REQUEST_TYPE = "MAGIC_NS_SRC_PROXY_FETCH";
+  var RESPONSE_TYPE = "MAGIC_NS_SRC_PROXY_FETCH_RESPONSE";
+  var LOG_TYPE = "MAGIC_NS_SRC_PROXY_LOG";
+  var nextId = 0;
+  var pending = {};
+
+  function proxyLog(level, message) {
+    try {
+      window.parent.postMessage({ type: LOG_TYPE, level: level, message: String(message) }, "*");
+    } catch (e) {}
+    try { (level === "error" ? console.error : level === "warn" ? console.warn : console.log)("[magic-ns] " + message); } catch (e) {}
+  }
+
+  proxyLog("info", "Suitelet proxy bootstrap installed. baseURI=" + (document.baseURI || location.href) + " hash=" + (location.hash || "(none)"));
+
+  // In a srcdoc iframe, window.location and the document origin are the MCP host
+  // (e.g. claudemcpcontent.com), NOT NetSuite — and the host strips our <base>.
+  // So both the SPA (which builds URLs from location.pathname/search) and
+  // NetSuite's own framework (absolute "/app/..." paths) target the wrong host
+  // and 404. mapToNetsuite() rewrites any host-origin / location-derived request
+  // back onto the real NetSuite origin so it can be proxied with credentials.
+  // The embedder URL (what document.baseURI points at, e.g.
+  // claudemcpcontent.com/mcp_apps). In a srcdoc frame window.location is
+  // about:srcdoc, so we MUST key off baseURI, not location.
+  var EMBEDDER_ORIGIN = "";
+  var EMBEDDER_PATH = "";
+  var EMBEDDER_PARAM_KEYS = {};
+  try {
+    var embedder = new URL(document.baseURI);
+    EMBEDDER_ORIGIN = embedder.origin;
+    EMBEDDER_PATH = embedder.pathname;
+    embedder.searchParams.forEach(function(_v, k) { EMBEDDER_PARAM_KEYS[k] = true; });
+  } catch (e) {}
+
+  // NetSuite asset/handler paths that should keep their path and just swap origin.
+  function looksLikeNetsuitePath(pathname) {
+    return /^\\/(app|assets|javascript|core|services|rest|c\\.|site)\\b/i.test(pathname) ||
+      /\\.(nl|jsp|js|css|png|jpe?g|gif|svg|woff2?|ttf|json|map)$/i.test(pathname);
+  }
+
+  function mapToNetsuite(value) {
+    var raw = String(value || "");
+    var abs;
+    try { abs = new URL(raw, document.baseURI || location.href); }
+    catch (e) { return raw; }
+
+    // Non-http schemes (data:, blob:, javascript:, about:) pass through untouched.
+    if (abs.protocol !== "http:" && abs.protocol !== "https:") return abs.href;
+    // Already pointed at NetSuite.
+    if (/\\.netsuite\\.com$/i.test(abs.hostname)) return abs.href;
+    if (!NS_ORIGIN || !NS_BASE) return abs.href;
+
+    var sameAsEmbedder = EMBEDDER_ORIGIN && abs.origin === EMBEDDER_ORIGIN;
+
+    // SPA api calls are built from location.pathname/search + "&action=<x>". Because
+    // the srcdoc location is about:srcdoc, that base is garbage — but the tell-tale
+    // "action=" survives. Rebuild the call on the real Suitelet URL, carrying the
+    // action (and any other params the SPA appended that aren't embedder params).
+    var actionMatch = raw.match(/[?&]action=([^&#]*)/i);
+    var isAssetPath = looksLikeNetsuitePath(abs.pathname);
+    if (actionMatch && (sameAsEmbedder || !isAssetPath)) {
+      try {
+        var spaUrl = new URL(NS_BASE);
+        abs.searchParams.forEach(function(val, key) {
+          if (!EMBEDDER_PARAM_KEYS[key]) spaUrl.searchParams.set(key, val);
+        });
+        spaUrl.searchParams.set("action", decodeURIComponent(actionMatch[1]));
+        return spaUrl.href;
+      } catch (e) {}
+    }
+
+    // Absolute-path NetSuite resources aimed at the embedder origin: swap origin.
+    if (sameAsEmbedder) {
+      try {
+        var resourceUrl = new URL(NS_ORIGIN);
+        resourceUrl.pathname = abs.pathname;
+        resourceUrl.search = abs.search;
+        resourceUrl.hash = abs.hash;
+        return resourceUrl.href;
+      } catch (e) {}
+    }
+    return abs.href;
+  }
+
+  // Back-compat alias: every caller now resolves through the NetSuite mapper.
+  function absoluteUrl(value) {
+    return mapToNetsuite(value);
+  }
+
+  window.addEventListener("error", function(event) {
+    proxyLog("error", "Page error: " + (event && event.message ? event.message : "unknown") + (event && event.filename ? " @ " + event.filename + ":" + event.lineno : ""));
+  });
+  window.addEventListener("unhandledrejection", function(event) {
+    var reason = event && event.reason ? (event.reason.message || event.reason) : "unknown";
+    proxyLog("error", "Unhandled promise rejection: " + reason);
+  });
+  window.addEventListener("hashchange", function() {
+    proxyLog("info", "hashchange → " + (location.hash || "(none)"));
+  });
+  window.addEventListener("beforeunload", function() {
+    proxyLog("warn", "Page is navigating/unloading (href=" + location.href + "). A full navigation leaves the proxied srcdoc document and usually causes a blank panel.");
+  });
+
+  function shouldProxy(value) {
+    try {
+      var url = new URL(absoluteUrl(value));
+      return /\.netsuite\.com$/i.test(url.hostname);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function shouldPatchUrl(value) {
+    try {
+      var url = new URL(absoluteUrl(value));
+      return (
+        /\.netsuite\.com$/i.test(url.hostname) &&
+        (
+          url.pathname === "/app/site/hosting/scriptlet.nl" ||
+          url.pathname === "/app/common/scripting/nlapijsonhandler.nl"
+        )
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function withEmbedParams(value) {
+    try {
+      var url = new URL(absoluteUrl(value));
+      if (!shouldPatchUrl(url.href)) return url.href;
+      // Only scriptlet.nl needs the identity params re-applied; the JSON handler
+      // carries its own routing in the body.
+      if (url.pathname === "/app/site/hosting/scriptlet.nl") {
+        Object.keys(BASELINE_PARAMS).forEach(function(key) {
+          if (!url.searchParams.has(key) || url.searchParams.get(key) === "") {
+            url.searchParams.set(key, BASELINE_PARAMS[key]);
+          }
+        });
+      }
+      Object.keys(EMBED_PARAMS).forEach(function(key) {
+        if (!url.searchParams.has(key)) url.searchParams.set(key, EMBED_PARAMS[key]);
+      });
+      return url.href;
+    } catch (e) {
+      return absoluteUrl(value);
+    }
+  }
+
+  function hasHeader(headers, name) {
+    name = String(name).toLowerCase();
+    return Object.keys(headers || {}).some(function(key) { return key.toLowerCase() === name; });
+  }
+
+  function normalizeBodyAndHeaders(body, headers) {
+    headers = headers || {};
+    if (body == null) return { body: null, headers: headers };
+    if (typeof body === "string") return { body: body, headers: headers };
+    if (body instanceof URLSearchParams) {
+      if (!hasHeader(headers, "content-type")) headers["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8";
+      return { body: body.toString(), headers: headers };
+    }
+    if (body instanceof FormData) {
+      var params = new URLSearchParams();
+      body.forEach(function(value, key) {
+        params.append(key, value instanceof File ? value.name : String(value));
+      });
+      if (!hasHeader(headers, "content-type")) headers["content-type"] = "application/x-www-form-urlencoded;charset=UTF-8";
+      return { body: params.toString(), headers: headers };
+    }
+    if (body instanceof Blob || body instanceof ArrayBuffer) {
+      return { unsupported: true, body: null, headers: headers };
+    }
+    return { body: String(body), headers: headers };
+  }
+
+  function patchForms() {
+    try {
+      Array.prototype.forEach.call(document.querySelectorAll("form"), function(form) {
+        var action = form.getAttribute("action") || location.href;
+        if (shouldPatchUrl(action)) form.setAttribute("action", withEmbedParams(action));
+      });
+    } catch (e) {}
+  }
+
+  function proxyRequest(payload) {
+    return new Promise(function(resolve, reject) {
+      var id = "src-proxy-" + Date.now() + "-" + (++nextId);
+      var timer = setTimeout(function() {
+        delete pending[id];
+        reject(new Error("Suitelet proxy request timed out."));
+      }, 45000);
+      pending[id] = { resolve: resolve, reject: reject, timer: timer };
+      window.parent.postMessage({ type: REQUEST_TYPE, id: id, payload: payload }, "*");
+    });
+  }
+
+  window.addEventListener("message", function(event) {
+    var data = event.data || {};
+    if (data.type !== RESPONSE_TYPE || !pending[data.id]) return;
+    var entry = pending[data.id];
+    clearTimeout(entry.timer);
+    delete pending[data.id];
+    if (data.response && data.response.ok) entry.resolve(data.response);
+    else entry.reject(new Error((data.response && data.response.error) || "Suitelet proxy request failed."));
+  });
+
+  var nativeFetch = window.fetch;
+  if (typeof nativeFetch === "function") {
+    window.fetch = function(input, init) {
+      var inputUrl = input && input.url ? input.url : input;
+      var fetchMethod = (init && init.method) || (input && input.method) || "GET";
+      if (!shouldProxy(inputUrl)) {
+        proxyLog("info", "fetch passthrough (not NetSuite): " + fetchMethod + " " + absoluteUrl(inputUrl));
+        return nativeFetch.apply(this, arguments);
+      }
+      init = init || {};
+      var headers = {};
+      try { new Headers(init.headers || (input && input.headers)).forEach(function(value, key) { headers[key] = value; }); } catch (e) {}
+      var normalized = normalizeBodyAndHeaders(init.body == null ? null : init.body, headers);
+      if (normalized.unsupported) {
+        proxyLog("warn", "fetch passthrough (unsupported body type, cannot proxy): " + fetchMethod + " " + absoluteUrl(inputUrl));
+        return nativeFetch.apply(this, arguments);
+      }
+      proxyLog("info", "fetch intercepted: " + fetchMethod + " " + withEmbedParams(inputUrl));
+      return proxyRequest({
+        url: withEmbedParams(inputUrl),
+        originalUrl: absoluteUrl(inputUrl),
+        source: "fetch",
+        method: init.method || (input && input.method) || "GET",
+        headers: normalized.headers,
+        body: normalized.body
+      }).then(function(response) {
+        proxyLog(
+          (response.status || 0) >= 400 ? "warn" : "info",
+          "fetch result " + (response.status || "?") + " " + (response.statusText || "") + " (" + ((response.body || "").length) + " bytes) " + (response.url || withEmbedParams(inputUrl))
+        );
+        return new Response(response.body || "", {
+          status: response.status || 200,
+          statusText: response.statusText || "OK",
+          headers: response.headers || {}
+        });
+      }).catch(function(error) {
+        proxyLog("error", "fetch proxy failed: " + (error && error.message ? error.message : error) + " for " + withEmbedParams(inputUrl));
+        throw error;
+      });
+    };
+  }
+
+  var NativeXHR = window.XMLHttpRequest;
+  function ProxyXHR() {
+    this._listeners = {};
+    this._headers = {};
+    this.readyState = 0;
+    this.status = 0;
+    this.statusText = "";
+    this.responseText = "";
+    this.response = "";
+    this.responseURL = "";
+  }
+  ProxyXHR.UNSENT = 0; ProxyXHR.OPENED = 1; ProxyXHR.HEADERS_RECEIVED = 2; ProxyXHR.LOADING = 3; ProxyXHR.DONE = 4;
+  ProxyXHR.prototype.open = function(method, url, async) {
+    this._method = method || "GET";
+    this._originalUrl = absoluteUrl(url);
+    this._url = withEmbedParams(url);
+    this._proxy = shouldProxy(this._url);
+    if (!this._proxy) {
+      proxyLog("info", "XHR passthrough (not NetSuite): " + this._method + " " + this._url);
+      this._native = new NativeXHR();
+      wireNative(this);
+      return this._native.open.apply(this._native, arguments);
+    }
+    proxyLog("info", "XHR intercepted: " + this._method + " " + this._url);
+    this.readyState = 1;
+    this._emit("readystatechange");
+  };
+  ProxyXHR.prototype.setRequestHeader = function(name, value) {
+    if (this._native) return this._native.setRequestHeader(name, value);
+    this._headers[name] = value;
+  };
+  ProxyXHR.prototype.send = function(body) {
+    var self = this;
+    if (this._native) return this._native.send(body);
+    var normalized = normalizeBodyAndHeaders(body, this._headers);
+    if (normalized.unsupported) {
+      self.status = 0;
+      self.statusText = "Unsupported Suitelet proxy request body.";
+      self.readyState = 4;
+      self._emit("readystatechange");
+      self._emit("error");
+      self._emit("loadend");
+      return;
+    }
+    proxyRequest({ url: this._url, originalUrl: this._originalUrl, source: "xhr", method: this._method, headers: normalized.headers, body: normalized.body })
+      .then(function(response) {
+        self.status = response.status || 200;
+        self.statusText = response.statusText || "OK";
+        self.responseText = response.body || "";
+        try {
+          self.response = self.responseType === "json" ? JSON.parse(self.responseText || "null") : self.responseText;
+        } catch (e) {
+          self.response = self.responseText;
+        }
+        self.responseURL = response.url || self._url;
+        self.readyState = 4;
+        proxyLog(
+          self.status >= 400 ? "warn" : "info",
+          "XHR result " + self.status + " " + self.statusText + " (" + self.responseText.length + " bytes) " + self.responseURL
+        );
+        self._emit("readystatechange");
+        self._emit("load");
+        self._emit("loadend");
+      })
+      .catch(function(error) {
+        self.status = 0;
+        self.statusText = error.message || "Suitelet proxy request failed.";
+        self.readyState = 4;
+        proxyLog("error", "XHR proxy failed: " + self.statusText + " for " + self._url);
+        self._emit("readystatechange");
+        self._emit("error");
+        self._emit("loadend");
+      });
+  };
+  ProxyXHR.prototype.addEventListener = function(type, listener) {
+    (this._listeners[type] || (this._listeners[type] = [])).push(listener);
+    if (this._native) this._native.addEventListener(type, listener);
+  };
+  ProxyXHR.prototype.removeEventListener = function(type, listener) {
+    this._listeners[type] = (this._listeners[type] || []).filter(function(item) { return item !== listener; });
+    if (this._native) this._native.removeEventListener(type, listener);
+  };
+  ProxyXHR.prototype.abort = function() { if (this._native) return this._native.abort(); this._emit("abort"); };
+  ProxyXHR.prototype.getResponseHeader = function() { return this._native ? this._native.getResponseHeader.apply(this._native, arguments) : null; };
+  ProxyXHR.prototype.getAllResponseHeaders = function() { return this._native ? this._native.getAllResponseHeaders.apply(this._native, arguments) : ""; };
+  ProxyXHR.prototype._emit = function(type) {
+    var event = new Event(type);
+    if (typeof this["on" + type] === "function") this["on" + type](event);
+    (this._listeners[type] || []).forEach(function(listener) { listener.call(this, event); }, this);
+  };
+  function wireNative(proxy) {
+    ["readystatechange", "load", "error", "abort", "loadend"].forEach(function(type) {
+      proxy._native.addEventListener(type, function(event) {
+        proxy.readyState = proxy._native.readyState;
+        proxy.status = proxy._native.status;
+        proxy.statusText = proxy._native.statusText;
+        proxy.responseText = proxy._native.responseText;
+        proxy.response = proxy._native.response;
+        proxy.responseURL = proxy._native.responseURL;
+        proxy._emit(type, event);
+      });
+    });
+  }
+  window.XMLHttpRequest = ProxyXHR;
+
+  // Fragment anchors (<a href="#/providers">) resolve against document.baseURI,
+  // which in a srcdoc frame is the embedder URL — so a click triggers a FULL
+  // navigation to claudemcpcontent.com/...#/providers and blanks the panel.
+  // Intercept them and perform a same-document hash change instead, which is
+  // what the SPA's hashchange router actually listens for.
+  document.addEventListener("click", function(event) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    var anchor = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+    if (!anchor) return;
+    var href = anchor.getAttribute("href");
+    if (!href || href.charAt(0) !== "#") return;
+    event.preventDefault();
+    try {
+      if (("#" + location.hash.replace(/^#/, "")) === href || location.hash === href) {
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      } else {
+        location.hash = href;
+      }
+      proxyLog("info", "Hash nav → " + href);
+    } catch (e) {
+      proxyLog("error", "Hash nav failed for " + href + ": " + (e && e.message ? e.message : e));
+    }
+  }, true);
+
+  document.addEventListener("submit", function(event) {
+    if (!event || !event.target) return;
+    var form = event.target;
+    var action = form.getAttribute && (form.getAttribute("action") || location.href);
+    if (action && shouldPatchUrl(action)) form.setAttribute("action", withEmbedParams(action));
+  }, true);
+  patchForms();
+  try {
+    new MutationObserver(patchForms).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+})();
+</script>`;
+}
+
+function absolutizeSuiteletUrl(value, baseUrl) {
+  try {
+    return new URL(decodeHtmlAttribute(String(value)), baseUrl).href;
+  } catch {
+    return String(value || "");
+  }
+}
+
+function decodeHtmlAttribute(value) {
+  return String(value || "")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function rewriteCssUrls(css, cssUrl) {
+  return String(css || "").replace(/url\((['"]?)(?!data:|https?:|#)([^'")]+)\1\)/gi, (_match, quote, value) => {
+    return `url(${quote}${absolutizeSuiteletUrl(value, cssUrl)}${quote})`;
+  });
+}
+
+async function fetchTextForSuiteletRender(resourceUrl) {
+  const targetUrl = new URL(resourceUrl);
+  const allowedAssetHosts = new Set([
+    "cdn.datatables.net",
+    "maxcdn.bootstrapcdn.com",
+    "stackpath.bootstrapcdn.com",
+    "code.jquery.com",
+    "cdnjs.cloudflare.com"
+  ]);
+  const allowed =
+    /\.netsuite\.com$/i.test(targetUrl.hostname) ||
+    allowedAssetHosts.has(targetUrl.hostname.toLowerCase());
+  if (!allowed) {
+    throw new Error(`Blocked render resource host: ${targetUrl.hostname}`);
+  }
+  const response = await fetch(targetUrl.href, {
+    method: "GET",
+    credentials: "include",
+    redirect: "follow"
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return {
+    url: response.url || targetUrl.href,
+    text: await response.text()
+  };
+}
+
+async function inlineSuiteletAssets(html, finalUrl) {
+  let output = String(html || "");
+  const stats = {
+    stylesheetsFound: 0,
+    stylesheetsInlined: 0,
+    scriptsFound: 0,
+    scriptsInlined: 0,
+    failures: []
+  };
+
+  const stylesheetPattern = /<link\b([^>]*?rel=["'][^"']*stylesheet[^"']*["'][^>]*?)>/gi;
+  output = await replaceAsync(output, stylesheetPattern, async (match, attrs) => {
+    stats.stylesheetsFound += 1;
+    const href = /href=["']([^"']+)["']/i.exec(attrs)?.[1];
+    if (!href) return match;
+    const resourceUrl = absolutizeSuiteletUrl(href, finalUrl);
+    try {
+      const fetched = await fetchTextForSuiteletRender(resourceUrl);
+      stats.stylesheetsInlined += 1;
+      return `<style data-magic-inline-source="${fetched.url.replace(/"/g, "&quot;")}">${rewriteCssUrls(fetched.text, fetched.url)}</style>`;
+    } catch (error) {
+      stats.failures.push({ type: "stylesheet", url: resourceUrl, error: String(error?.message || error) });
+      return `<!-- Magic NetSuite failed to inline stylesheet ${resourceUrl}: ${String(error?.message || error)} -->${match}`;
+    }
+  });
+
+  const scriptPattern = /<script\b([^>]*)\bsrc=["']([^"']+)["']([^>]*)>\s*<\/script>/gi;
+  output = await replaceAsync(output, scriptPattern, async (match, before, src, after) => {
+    stats.scriptsFound += 1;
+    const resourceUrl = absolutizeSuiteletUrl(src, finalUrl);
+    try {
+      const fetched = await fetchTextForSuiteletRender(resourceUrl);
+      stats.scriptsInlined += 1;
+      return `<script${before}${after} data-magic-inline-source="${fetched.url.replace(/"/g, "&quot;")}">\n${fetched.text}\n//# sourceURL=${fetched.url}\n</script>`;
+    } catch (error) {
+      stats.failures.push({ type: "script", url: resourceUrl, error: String(error?.message || error) });
+      return `<!-- Magic NetSuite failed to inline script ${resourceUrl}: ${String(error?.message || error)} -->${match}`;
+    }
+  });
+
+  return { html: output, stats };
+}
+
+async function replaceAsync(source, pattern, replacer) {
+  const parts = [];
+  let lastIndex = 0;
+  for (const match of source.matchAll(pattern)) {
+    parts.push(source.slice(lastIndex, match.index));
+    parts.push(await replacer(...match));
+    lastIndex = match.index + match[0].length;
+  }
+  parts.push(source.slice(lastIndex));
+  return parts.join("");
+}
+
+async function prepareSuiteletHtmlForSrcdoc(html, finalUrl, originalUrl = finalUrl) {
+  const baseTag = `<base href="${String(finalUrl).replace(/"/g, "&quot;")}">`;
+  const inlined = await inlineSuiteletAssets(html, finalUrl);
+  let output = inlined.html;
+
+  // CSP delivered inside the HTML can block srcdoc rendering in the MCP app even
+  // when the network response itself is valid.
+  output = output.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/gi, "");
+  output = output.replace(/<meta[^>]+http-equiv=["']x-frame-options["'][^>]*>/gi, "");
+
+  if (/<head[^>]*>/i.test(output)) {
+    return {
+      html: output.replace(/<head([^>]*)>/i, `<head$1>${baseTag}${suiteletProxyBootstrapScript(originalUrl)}`),
+      stats: inlined.stats
+    };
+  }
+  return {
+    html: `${baseTag}${suiteletProxyBootstrapScript(originalUrl)}${output}`,
+    stats: inlined.stats
+  };
+}
+
+async function handleSuiteletFetchHtml(args) {
+  const rawUrl = String(args?.url || "").trim();
+  if (!rawUrl) throw new Error("url is required.");
+
+  const targetUrl = new URL(rawUrl);
+  if (!/\.netsuite\.com$/i.test(targetUrl.hostname)) {
+    throw new Error("Suitelet HTML fetch only supports NetSuite URLs.");
+  }
+
+  const response = await fetch(targetUrl.href, {
+    method: "GET",
+    credentials: "include",
+    redirect: "follow"
+  });
+  const html = await response.text();
+  const prepared = await prepareSuiteletHtmlForSrcdoc(html, response.url || targetUrl.href, targetUrl.href);
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        requestedUrl: targetUrl.href,
+        finalUrl: response.url,
+        html: prepared.html,
+        htmlLength: prepared.html.length,
+        assetStats: prepared.stats
+      }, null, 2)
+    }]
+  };
+}
+
+async function handleSuiteletProxyRequest(args) {
+  const rawUrl = String(args?.url || "").trim();
+  if (!rawUrl) throw new Error("url is required.");
+
+  const targetUrl = new URL(rawUrl);
+  if (!/\.netsuite\.com$/i.test(targetUrl.hostname)) {
+    throw new Error("Suitelet proxy only supports NetSuite URLs.");
+  }
+
+  const cleanHeaders = {};
+  const forbiddenHeaders = new Set([
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "cookie",
+    "host",
+    "origin",
+    "referer",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site"
+  ]);
+
+  Object.entries(args?.headers || {}).forEach(([key, value]) => {
+    if (!key || value == null) return;
+    if (forbiddenHeaders.has(String(key).toLowerCase())) return;
+    cleanHeaders[key] = String(value);
+  });
+
+  const response = await fetch(targetUrl.href, {
+    method: String(args?.method || "GET"),
+    headers: cleanHeaders,
+    body: args?.body == null ? undefined : String(args.body),
+    credentials: "include",
+    redirect: "follow"
+  });
+
+  const responseHeaders = {};
+  response.headers.forEach((value, key) => {
+    responseHeaders[key] = value;
+  });
+  const responseBody = await response.text();
+  const responsePreview = responseBody
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 700);
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: true,
+        requestedUrl: targetUrl.href,
+        originalUrl: String(args?.originalUrl || ""),
+        source: String(args?.source || ""),
+        rewritten: Boolean(args?.originalUrl && String(args.originalUrl) !== targetUrl.href),
+        requestMethod: String(args?.method || "GET"),
+        requestBodyLength: args?.body == null ? 0 : String(args.body).length,
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        contentType: responseHeaders["content-type"] || "",
+        headers: responseHeaders,
+        bodyLength: responseBody.length,
+        bodyPreview: response.status >= 400 ? responsePreview : "",
+        body: responseBody
+      }, null, 2)
+    }]
+  };
+}
+
+async function handleSuiteletStreamFrame() {
+  if (!suiteletStreamSession?.tabId || !suiteletStreamSession.windowId) {
+    throw new Error("No Suitelet stream session is active. Start one from the MCP app first.");
+  }
+
+  const tab = await chrome.tabs.get(suiteletStreamSession.tabId);
+  const viewport = await getSuiteletViewport(suiteletStreamSession.tabId);
+  suiteletStreamSession.url = tab.url || suiteletStreamSession.url;
+  const screenshot = await sendSuiteletDebuggerCommand(
+    suiteletStreamSession.tabId,
+    "Page.captureScreenshot",
+    {
+      format: "jpeg",
+      quality: 58,
+      optimizeForSpeed: true,
+      fromSurface: true,
+      captureBeyondViewport: false
+    }
+  );
+  const capturedAt = new Date().toISOString();
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        ok: true,
+        dataUrl: `data:image/jpeg;base64,${screenshot?.data || ""}`,
+        url: tab.url || suiteletStreamSession.url,
+        title: tab.title || viewport.title || "Suitelet",
+        capturedAt,
+        transport: "cdp-screenshot-fallback",
+        viewport
+      }, null, 2)
+    }]
+  };
+}
+
+async function dispatchSuiteletSyntheticInput(tabId, event, x, y) {
+  return chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    func: ({ event, x, y }) => {
+      const target = document.elementFromPoint(x, y) || document.body || document.documentElement;
+      if (!target) return false;
+
+      if (event.type === "wheel") {
+        target.dispatchEvent(new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y,
+          deltaX: Number(event.deltaX || 0),
+          deltaY: Number(event.deltaY || 0)
+        }));
+        return true;
+      }
+
+      if (event.type === "mousemove") {
+        target.dispatchEvent(new MouseEvent("mousemove", {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y
+        }));
+        return true;
+      }
+
+      target.dispatchEvent(new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0
+      }));
+      target.dispatchEvent(new MouseEvent("mouseup", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0
+      }));
+      if (typeof target.click === "function") target.click();
+      return true;
+    },
+    args: [{ event, x, y }]
+  });
+}
+
+async function handleSuiteletStreamInput(args) {
+  if (!suiteletStreamSession?.tabId) {
+    throw new Error("No Suitelet stream session is active. Start one from the MCP app first.");
+  }
+
+  const event = args?.event || {};
+  const type = String(event.type || "");
+  const tabId = suiteletStreamSession.tabId;
+  const viewport = await getSuiteletViewport(tabId);
+  const x = Math.max(0, Math.min(1, Number(event.x ?? 0))) * Number(viewport.width || 1280);
+  const y = Math.max(0, Math.min(1, Number(event.y ?? 0))) * Number(viewport.height || 720);
+
+  try {
+    if (type === "click") {
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x,
+        y,
+        button: "left",
+        clickCount: 1
+      });
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x,
+        y,
+        button: "left",
+        clickCount: 1
+      });
+    } else if (type === "mousemove") {
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x,
+        y
+      });
+    } else if (type === "wheel") {
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX: Number(event.deltaX || 0),
+        deltaY: Number(event.deltaY || 0)
+      });
+    } else if (type === "keydown" || type === "keyup") {
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchKeyEvent", {
+        type: type === "keydown" ? "keyDown" : "keyUp",
+        key: String(event.key || ""),
+        code: String(event.code || ""),
+        text: type === "keydown" && String(event.key || "").length === 1 ? String(event.key) : undefined,
+        windowsVirtualKeyCode: Number(event.keyCode || 0)
+      });
+    } else {
+      throw new Error(`Unsupported Suitelet input event: ${type}`);
+    }
+  } catch (error) {
+    if (type === "click" || type === "wheel" || type === "mousemove") {
+      await dispatchSuiteletSyntheticInput(tabId, event, x, y);
+    } else {
+      throw error;
+    }
+  }
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ ok: true, type, x, y }, null, 2)
+    }]
+  };
+}
+
+// -----------------------------
+// Suitelet programmatic control (CDP Runtime.evaluate on the real NetSuite tab)
+// -----------------------------
+
+function requireSuiteletControlTab() {
+  if (!suiteletStreamSession?.tabId) {
+    throw new Error("No Suitelet control session is active. Open one first with magic_netsuite_suitelet_control_open.");
+  }
+  return suiteletStreamSession.tabId;
+}
+
+// Runs a JS expression in the controlled Suitelet tab and returns its value.
+async function evalInSuiteletTab(expression, { awaitPromise = true } = {}) {
+  const tabId = requireSuiteletControlTab();
+  await ensureSuiteletDebugger(tabId);
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => null);
+  const result = await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise,
+    userGesture: true,
+    allowUnsafeEvalBlockedByCSP: true
+  });
+  if (result?.exceptionDetails) {
+    const ex = result.exceptionDetails;
+    throw new Error(ex.exception?.description || ex.text || "Suitelet evaluation error");
+  }
+  return result?.result?.value;
+}
+
+const SUITELET_INSPECT_EXPRESSION = `(function () {
+  function visible(el) {
+    var rect = el.getBoundingClientRect();
+    var style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
+  function selectorFor(el) {
+    if (el.id) return "#" + CSS.escape(el.id);
+    if (el.getAttribute("name")) return el.tagName.toLowerCase() + "[name=\\"" + el.getAttribute("name") + "\\"]";
+    var path = [];
+    var node = el;
+    while (node && node.nodeType === 1 && path.length < 5) {
+      var part = node.tagName.toLowerCase();
+      var parent = node.parentNode;
+      if (parent && parent.children) {
+        var idx = Array.prototype.indexOf.call(parent.children, node) + 1;
+        part += ":nth-child(" + idx + ")";
+      }
+      path.unshift(part);
+      if (node.id) { path[0] = "#" + CSS.escape(node.id); break; }
+      node = node.parentNode;
+    }
+    return path.join(" > ");
+  }
+  var nodes = Array.prototype.slice.call(
+    document.querySelectorAll("input, textarea, select, button, a[href], [role=button], [onclick]")
+  );
+  var out = [];
+  for (var i = 0; i < nodes.length && out.length < 120; i++) {
+    var el = nodes[i];
+    if (!visible(el)) continue;
+    out.push({
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute("type") || "",
+      id: el.id || "",
+      name: el.getAttribute("name") || "",
+      selector: selectorFor(el),
+      label: (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 100)
+    });
+  }
+  return { title: document.title, url: location.href, count: out.length, elements: out };
+})()`;
+
+// Bring the controlled Suitelet tab to the foreground so the user can watch.
+async function focusSuiteletControlTab() {
+  const tabId = suiteletStreamSession?.tabId;
+  if (!tabId) return;
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+  } catch (e) { /* tab may have closed; ignore */ }
+}
+
+async function handleSuiteletControlOpen(args) {
+  // Resolve the real account-correct URL — never trust a caller-invented host.
+  const target = await resolveSuiteletTarget(args);
+  // Open in the foreground so the execution is visible to the user.
+  await handleSuiteletStreamStart({ url: target.url, active: true });
+  const tabId = requireSuiteletControlTab();
+  await ensureSuiteletDebugger(tabId);
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => null);
+  await focusSuiteletControlTab();
+
+  let snapshot = null;
+  try { snapshot = await evalInSuiteletTab(SUITELET_INSPECT_EXPRESSION); } catch (e) { snapshot = { error: String(e?.message || e) }; }
+
+  let screenshotData = "";
+  try {
+    const shot = await sendSuiteletDebuggerCommand(tabId, "Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 60,
+      fromSurface: true,
+      captureBeyondViewport: false
+    });
+    screenshotData = shot?.data || "";
+  } catch (e) { /* screenshot is best-effort */ }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const content = [{
+    type: "text",
+    text: JSON.stringify({
+      ok: true,
+      session: suiteletStreamSession,
+      controlledUrl: tab?.url || suiteletStreamSession?.url || "",
+      controlledTitle: tab?.title || "",
+      matched: target.matched,
+      alternatives: target.alternatives,
+      snapshot
+    }, null, 2)
+  }];
+  if (screenshotData) {
+    content.push({ type: "image", data: screenshotData, mimeType: "image/jpeg" });
+  }
+  return { content };
+}
+
+async function handleSuiteletInspect() {
+  const snapshot = await evalInSuiteletTab(SUITELET_INSPECT_EXPRESSION);
+  return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...snapshot }, null, 2) }] };
+}
+
+async function captureSuiteletScreenshotData(tabId) {
+  try {
+    const shot = await sendSuiteletDebuggerCommand(tabId, "Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 60,
+      fromSurface: true,
+      captureBeyondViewport: false
+    });
+    return shot?.data || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+async function handleSuiteletScreenshot() {
+  const tabId = requireSuiteletControlTab();
+  await ensureSuiteletDebugger(tabId);
+  const data = await captureSuiteletScreenshotData(tabId);
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const content = [{
+    type: "text",
+    text: JSON.stringify({ ok: true, url: tab?.url || "", title: tab?.title || "" }, null, 2)
+  }];
+  if (data) content.push({ type: "image", data, mimeType: "image/jpeg" });
+  return { content };
+}
+
+async function handleSuiteletHover(args) {
+  const tabId = requireSuiteletControlTab();
+  await focusSuiteletControlTab();
+  const selector = String(args?.selector || "").trim();
+  let x = Number(args?.x);
+  let y = Number(args?.y);
+  let resolved = null;
+
+  if (selector) {
+    resolved = await evalInSuiteletTab(`(function () {
+      var el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { ok: false };
+      el.scrollIntoView({ block: "center", inline: "center" });
+      var r = el.getBoundingClientRect();
+      return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2, label: (el.innerText || el.value || el.getAttribute("title") || "").trim().slice(0, 100) };
+    })()`);
+    if (!resolved || !resolved.ok) throw new Error(`Element not found: ${selector}`);
+    x = resolved.x;
+    y = resolved.y;
+  }
+
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error("Provide a selector, or x and y viewport coordinates, to hover.");
+  }
+
+  // Native :hover requires a real pointer move through CDP.
+  try {
+    await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y, buttons: 0 });
+  } catch (e) { /* fall back to synthetic events below */ }
+
+  // Synthetic pointer/mouse events for JS-driven tooltips/menus.
+  await evalInSuiteletTab(`(function () {
+    var el = document.elementFromPoint(${x}, ${y});
+    if (!el) return { ok: false };
+    ["pointerover", "pointerenter", "mouseover", "mouseenter", "mousemove"].forEach(function (type) {
+      try {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: type.indexOf("enter") === -1, cancelable: true, clientX: ${x}, clientY: ${y} }));
+      } catch (e) {}
+    });
+    return { ok: true };
+  })()`).catch(() => null);
+
+  const data = await captureSuiteletScreenshotData(tabId);
+  const content = [{
+    type: "text",
+    text: JSON.stringify({ ok: true, target: selector || `${x},${y}`, x, y, label: resolved?.label || "" }, null, 2)
+  }];
+  if (data) content.push({ type: "image", data, mimeType: "image/jpeg" });
+  return { content };
+}
+
+async function handleSuiteletScroll(args) {
+  const tabId = requireSuiteletControlTab();
+  await focusSuiteletControlTab();
+  const selector = String(args?.selector || "").trim();
+  const to = String(args?.to || "").trim().toLowerCase(); // "top" | "bottom" | ""
+  const dy = Number(args?.dy);
+  const dx = Number(args?.dx);
+  const expression = `(function () {
+    var selector = ${JSON.stringify(selector)};
+    var to = ${JSON.stringify(to)};
+    var dy = ${Number.isFinite(dy) ? dy : "null"};
+    var dx = ${Number.isFinite(dx) ? dx : "null"};
+
+    // Find the most relevant scrollable element on the page (e.g. a DataTables
+    // results body with overflow:auto and a fixed height), preferring the tallest.
+    function findScrollable() {
+      var best = null, bestScore = -1;
+      var all = document.querySelectorAll("*");
+      for (var i = 0; i < all.length; i++) {
+        var node = all[i];
+        var overflowable = node.scrollHeight - node.clientHeight > 40;
+        if (!overflowable) continue;
+        var oy = getComputedStyle(node).overflowY;
+        if (oy !== "auto" && oy !== "scroll") continue;
+        var score = (node.scrollHeight - node.clientHeight) * Math.max(1, node.clientHeight);
+        if (score > bestScore) { bestScore = score; best = node; }
+      }
+      return best;
+    }
+
+    var el = selector ? document.querySelector(selector) : null;
+    if (selector && !el) return { ok: false, error: "Element not found: " + selector };
+
+    // Pure "scroll into view" when a selector is given with no movement args.
+    if (el && dy == null && dx == null && !to) {
+      el.scrollIntoView({ block: "center", inline: "nearest" });
+      var r0 = el.getBoundingClientRect();
+      return { ok: true, target: selector, scrolledIntoView: true };
+    }
+
+    // Choose what to scroll: explicit selector, else the detected inner container,
+    // else the document. Scroll both the chosen element AND the window so we move
+    // regardless of which one actually overflows.
+    var inner = el || findScrollable();
+    var docEl = document.scrollingElement || document.documentElement;
+    var pageEl = (inner === docEl || inner === document.body || inner == null) ? null : inner;
+
+    function curTop(node) { return node === docEl ? (window.scrollY || docEl.scrollTop || 0) : node.scrollTop; }
+    var beforePage = pageEl ? curTop(pageEl) : null;
+    var beforeWin = window.scrollY || docEl.scrollTop || 0;
+
+    function applyTo(node, isWindow) {
+      if (to === "bottom") { if (isWindow) window.scrollTo(0, docEl.scrollHeight); else node.scrollTop = node.scrollHeight; }
+      else if (to === "top") { if (isWindow) window.scrollTo(0, 0); else node.scrollTop = 0; }
+      else { var ddy = (dy == null ? 600 : dy); if (isWindow) window.scrollBy(dx || 0, ddy); else { node.scrollTop += ddy; node.scrollLeft += (dx || 0); } }
+    }
+    if (pageEl) applyTo(pageEl, false);
+    applyTo(docEl, true);
+
+    var afterPage = pageEl ? curTop(pageEl) : null;
+    var afterWin = window.scrollY || docEl.scrollTop || 0;
+    var movedContainer = pageEl ? (afterPage - beforePage) : 0;
+    var movedWindow = afterWin - beforeWin;
+    var ref = pageEl || docEl;
+    var refTop = pageEl ? afterPage : afterWin;
+    return {
+      ok: true,
+      target: selector || (pageEl ? "auto-detected scroll container" : "window"),
+      movedContainerPx: movedContainer,
+      movedWindowPx: movedWindow,
+      moved: Math.abs(movedContainer) + Math.abs(movedWindow) > 0,
+      scrollTop: refTop,
+      scrollHeight: ref.scrollHeight,
+      clientHeight: ref.clientHeight || window.innerHeight,
+      atBottom: refTop + (ref.clientHeight || window.innerHeight) >= (ref.scrollHeight || 0) - 2
+    };
+  })()`;
+  const value = await evalInSuiteletTab(expression);
+  const data = await captureSuiteletScreenshotData(tabId);
+  const content = [{ type: "text", text: JSON.stringify(value, null, 2) }];
+  if (data) content.push({ type: "image", data, mimeType: "image/jpeg" });
+  return { content };
+}
+
+async function handleSuiteletFill(args) {
+  const selector = String(args?.selector || "").trim();
+  if (!selector) throw new Error("selector is required.");
+  const value = args?.value == null ? "" : String(args.value);
+  await focusSuiteletControlTab();
+  const expression = `(function () {
+    var el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return { ok: false, error: "Element not found: " + ${JSON.stringify(selector)} };
+    el.focus();
+    var value = ${JSON.stringify(value)};
+    try {
+      var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+      if (descriptor && descriptor.set) descriptor.set.call(el, value);
+      else el.value = value;
+    } catch (e) { el.value = value; }
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true, selector: ${JSON.stringify(selector)}, value: el.value };
+  })()`;
+  const value2 = await evalInSuiteletTab(expression);
+  return { content: [{ type: "text", text: JSON.stringify(value2, null, 2) }] };
+}
+
+async function handleSuiteletClick(args) {
+  const selector = String(args?.selector || "").trim();
+  const text = String(args?.text || "").trim();
+  if (!selector && !text) throw new Error("Provide a selector or visible text to click.");
+  await focusSuiteletControlTab();
+  const expression = `(function () {
+    var el = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "null"};
+    if (!el && ${JSON.stringify(text)}) {
+      var needle = ${JSON.stringify(text.toLowerCase())};
+      var cands = Array.prototype.slice.call(
+        document.querySelectorAll("button, a, input[type=button], input[type=submit], [role=button], .uir-button, span.bntxt, td.bntxt")
+      );
+      el = cands.filter(function (c) {
+        var label = (c.innerText || c.value || c.getAttribute("title") || "").trim().toLowerCase();
+        return label === needle;
+      })[0] || cands.filter(function (c) {
+        var label = (c.innerText || c.value || c.getAttribute("title") || "").trim().toLowerCase();
+        return label.indexOf(needle) !== -1;
+      })[0];
+    }
+    if (!el) return { ok: false, error: "Clickable element not found." };
+    if (el.scrollIntoView) el.scrollIntoView({ block: "center" });
+    el.click();
+    return { ok: true, clicked: (el.innerText || el.value || el.id || el.tagName || "").toString().trim().slice(0, 100) };
+  })()`;
+  const value = await evalInSuiteletTab(expression);
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+}
+
+async function handleSuiteletRead(args) {
+  const selector = String(args?.selector || "").trim();
+  const maxLength = Math.max(100, Math.min(40000, Number(args?.maxLength) || 8000));
+  const expression = `(function () {
+    var target = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "document.body"};
+    if (!target) return { ok: false, error: "Element not found." };
+    var text = (target.value != null && target.value !== "") ? target.value : (target.innerText || target.textContent || "");
+    return { ok: true, selector: ${JSON.stringify(selector || "body")}, length: text.length, text: text.slice(0, ${maxLength}) };
+  })()`;
+  const value = await evalInSuiteletTab(expression);
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+}
+
+async function handleSuiteletEval(args) {
+  const expression = String(args?.expression || "").trim();
+  if (!expression) throw new Error("expression is required.");
+  const value = await evalInSuiteletTab(`(function () { return (${expression}); })()`).catch(async (err) => {
+    // Allow statement-style snippets too (not just expressions).
+    if (/SyntaxError|Unexpected/i.test(String(err?.message || err))) {
+      return evalInSuiteletTab(`(function () { ${expression} })()`);
+    }
+    throw err;
+  });
+  return { content: [{ type: "text", text: JSON.stringify({ ok: true, value }, null, 2) }] };
 }
 
 // -----------------------------
