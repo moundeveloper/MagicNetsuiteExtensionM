@@ -1,0 +1,38 @@
+{
+  "name": "magic-netsuite-mcp-app",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Interactive MCP App for sending NetSuite files and records into Claude chat.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc --noEmit && cross-env INPUT=mcp-app.html vite build && tsc -p tsconfig.server.json",
+    "start": "concurrently \"cross-env NODE_ENV=development INPUT=mcp-app.html vite build --watch\" \"tsx watch main.ts\"",
+    "start:stdio": "npm run build 1>&2 && node dist/main.js --stdio",
+    "serve": "node dist/main.js",
+    "check": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.1.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "playwright": "^1.61.0",
+    "zod": "^4.1.13",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.3",
+    "vite": "^6.3.5",
+    "vite-plugin-singlefile": "^2.3.0",
+    "vue": "^3.5.35"
+  }
+}
