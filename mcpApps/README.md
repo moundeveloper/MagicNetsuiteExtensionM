@@ -21,10 +21,16 @@ The installer writes this server to %APPDATA%\Claude\claude_desktop_config.json:
 `json
 "magic-netsuite-apps": {
   "command": "<this-folder>\\runtime\\node.exe",
-  "args": ["<this-folder>\\dist\\main.js", "--stdio"]
+  "args": ["<this-folder>\\dist\\main.js", "--stdio"],
+  "env": {
+    "MAGIC_NETSUITE_MCP_PIPE": "magic_netsuite_mcp_bridge",
+    "MAGIC_NS_PLAYWRIGHT": "1"
+  }
 }
 `
 
 The bundled Node runtime is used, so the user does not need Node installed.
+Playwright mode is enabled by default. Pass -DisablePlaywright only if you
+need to force the legacy external-browser fallback.
 
 The Magic NetSuite Chrome extension MCP bridge must also be installed and enabled.

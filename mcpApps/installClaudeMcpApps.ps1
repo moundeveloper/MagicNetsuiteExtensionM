@@ -1,5 +1,6 @@
 param(
-    [switch]$UsePlaywright
+    [switch]$UsePlaywright,
+    [switch]$DisablePlaywright
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,40 +9,9 @@ $AppRoot = $PSScriptRoot
 $NodeExe = Join-Path $AppRoot "runtime\node.exe"
 $MainJs = Join-Path $AppRoot "dist\main.js"
 $ServerName = "magic-netsuite-apps"
+$LegacyServerName = "magic-netsuite-app"
 $ClaudeDir = Join-Path $env:APPDATA "Claude"
 $ClaudeConfigPath = Join-Path $ClaudeDir "claude_desktop_config.json"
-
-function ConvertTo-Hashtable {
-    param([Parameter(ValueFromPipeline)] $InputObject)
-
-    if ($null -eq $InputObject) { return $null }
-
-    if ($InputObject -is [System.Collections.IDictionary]) {
-        $hash = @{}
-        foreach ($key in $InputObject.Keys) {
-            $hash[$key] = ConvertTo-Hashtable $InputObject[$key]
-        }
-        return $hash
-    }
-
-    if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
-        $items = @()
-        foreach ($item in $InputObject) {
-            $items += ConvertTo-Hashtable $item
-        }
-        return $items
-    }
-
-    if ($InputObject -is [pscustomobject]) {
-        $hash = @{}
-        foreach ($property in $InputObject.PSObject.Properties) {
-            $hash[$property.Name] = ConvertTo-Hashtable $property.Value
-        }
-        return $hash
-    }
-
-    return $InputObject
-}
 
 if (-not (Test-Path $NodeExe)) {
     throw "Bundled Node runtime not found at $NodeExe"
@@ -56,36 +26,72 @@ New-Item -ItemType Directory -Force -Path $ClaudeDir | Out-Null
 if (Test-Path $ClaudeConfigPath) {
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     Copy-Item -LiteralPath $ClaudeConfigPath -Destination "$ClaudeConfigPath.bak-$timestamp" -Force
-    $raw = Get-Content -LiteralPath $ClaudeConfigPath -Raw
-    if ([string]::IsNullOrWhiteSpace($raw)) {
-        $config = @{}
-    } else {
-        $config = ConvertTo-Hashtable ($raw | ConvertFrom-Json)
-    }
 } else {
-    $config = @{}
+    "{}" | Set-Content -LiteralPath $ClaudeConfigPath -Encoding UTF8
 }
 
-if (-not $config.ContainsKey("mcpServers") -or $null -eq $config["mcpServers"]) {
-    $config["mcpServers"] = @{}
+$playwrightValue = if ($DisablePlaywright) { "0" } else { "1" }
+
+$updateScript = @'
+const fs = require("fs");
+
+const [
+  configPath,
+  serverName,
+  legacyServerName,
+  nodeExe,
+  mainJs,
+  playwrightValue,
+] = process.argv.slice(2);
+
+let config = {};
+const raw = fs.existsSync(configPath)
+  ? fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "")
+  : "";
+
+if (raw.trim()) {
+  config = JSON.parse(raw);
 }
 
-$config["mcpServers"][$ServerName] = [ordered]@{
-    command = $NodeExe
-    args = @($MainJs, "--stdio")
-    env = [ordered]@{
-        MAGIC_NETSUITE_MCP_PIPE = "magic_netsuite_mcp_bridge"
-        MAGIC_NS_PLAYWRIGHT = $(if ($UsePlaywright) { "1" } else { "0" })
+if (!config || typeof config !== "object" || Array.isArray(config)) {
+  config = {};
+}
+
+if (!config.mcpServers || typeof config.mcpServers !== "object" || Array.isArray(config.mcpServers)) {
+  config.mcpServers = {};
+}
+
+delete config.mcpServers[legacyServerName];
+
+config.mcpServers[serverName] = {
+  command: nodeExe,
+  args: [mainJs, "--stdio"],
+  env: {
+    MAGIC_NETSUITE_MCP_PIPE: "magic_netsuite_mcp_bridge",
+    MAGIC_NS_PLAYWRIGHT: playwrightValue,
+  },
+};
+
+fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+'@
+
+$updateScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "magic-netsuite-install-claude-mcp-apps.js"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($updateScriptPath, $updateScript, $utf8NoBom)
+try {
+    & $NodeExe $updateScriptPath $ClaudeConfigPath $ServerName $LegacyServerName $NodeExe $MainJs $playwrightValue
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to update Claude Desktop MCP Apps config."
     }
+} finally {
+    Remove-Item -LiteralPath $updateScriptPath -Force -ErrorAction SilentlyContinue
 }
-
-$json = $config | ConvertTo-Json -Depth 30
-Set-Content -LiteralPath $ClaudeConfigPath -Value $json -Encoding UTF8
 
 Write-Host ""
 Write-Host "Magic NetSuite MCP Apps installed for Claude Desktop."
 Write-Host "Config: $ClaudeConfigPath"
 Write-Host "Server key: $ServerName"
+Write-Host "Playwright: $playwrightValue"
 Write-Host ""
 Write-Host "Restart Claude Desktop to load the apps."
 Write-Host "Keep the Magic NetSuite extension installed and its MCP bridge enabled."

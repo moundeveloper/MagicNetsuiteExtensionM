@@ -1,5 +1,6 @@
 ﻿param(
-    [switch]$UsePlaywright
+    [switch]$UsePlaywright,
+    [switch]$DisablePlaywright
 )
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
