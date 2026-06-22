@@ -131,11 +131,10 @@ window.runQuickScript = async (N, { code, requestId, mode = "normal" }) => {
           type: "log",
           values: args.map(stringifyArg)
         };
+        logs.push(entry);
 
         if (isStreaming) {
           emitStreamChunk(requestId, entry);
-        } else {
-          emitLog(requestId, entry);
         }
       },
       warn: (...args) => {
@@ -143,11 +142,10 @@ window.runQuickScript = async (N, { code, requestId, mode = "normal" }) => {
           type: "warn",
           values: args.map(stringifyArg)
         };
+        logs.push(entry);
 
         if (isStreaming) {
           emitStreamChunk(requestId, entry);
-        } else {
-          emitLog(requestId, entry);
         }
       },
       error: (...args) => {
@@ -155,11 +153,10 @@ window.runQuickScript = async (N, { code, requestId, mode = "normal" }) => {
           type: "error",
           values: args.map(stringifyArg)
         };
+        logs.push(entry);
 
         if (isStreaming) {
           emitStreamChunk(requestId, entry);
-        } else {
-          emitLog(requestId, entry);
         }
       },
       // Add streaming-specific method
@@ -286,7 +283,12 @@ window.runQuickScript = async (N, { code, requestId, mode = "normal" }) => {
     await yieldToMain();
 
     // Emit completion
-    emitComplete(requestId, result);
+    if (isStreaming) {
+      emitComplete(requestId, result);
+      return null;
+    }
+
+    return { result, logs };
   } catch (err) {
     const errorEntry = {
       type: "error",
@@ -296,8 +298,14 @@ window.runQuickScript = async (N, { code, requestId, mode = "normal" }) => {
 
     if (isStreaming) {
       emitStreamChunk(requestId, errorEntry);
+      emitError(requestId, err);
+      return null;
     }
 
-    emitError(requestId, err);
+    return {
+      result: null,
+      error: err?.message || String(err),
+      logs
+    };
   }
 };

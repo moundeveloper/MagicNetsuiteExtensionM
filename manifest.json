@@ -118,6 +118,7 @@
     "scripting",
     "storage",
     "activeTab",
+    "cookies",
     "debugger",
     "declarativeNetRequest",
     "*://*.app.netsuite.com/*",

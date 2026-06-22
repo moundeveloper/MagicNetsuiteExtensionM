@@ -239,11 +239,64 @@ const firstSuiteQLRow = async (N, sql) => {
   return rows[0] ?? null;
 };
 
-const setRecordValues = (rec, values, skipFieldIds = new Set()) => {
+const getNormalizedFieldType = (rec, fieldId) => {
+  try {
+    const field = rec.getField({ fieldId });
+    return String(field?.type ?? "").toLowerCase();
+  } catch {
+    return "";
+  }
+};
+
+const coerceDateValue = (value) => {
+  if (value instanceof Date) return value;
+  if (value === true || value === "" || value === null || value === undefined) {
+    return new Date();
+  }
+
+  const raw = String(value).trim();
+  const date =
+    !raw || raw.toLowerCase() === "now" || raw.toLowerCase() === "today"
+      ? new Date()
+      : new Date(value);
+
+  return Number.isNaN(date.getTime()) ? value : date;
+};
+
+const normalizeRecordFieldValue = (N, rec, fieldId, value) => {
+  const fieldType = getNormalizedFieldType(rec, fieldId);
+  if (!fieldType) return value;
+
+  const isDateTime =
+    fieldType === "datetime" ||
+    fieldType === "datetimetz" ||
+    fieldType.includes("datetime");
+  const isDate = fieldType === "date";
+
+  if (!isDateTime && !isDate) return value;
+
+  const date = coerceDateValue(value);
+  if (!(date instanceof Date)) return value;
+
+  return date;
+};
+
+const normalizeRecordValues = (N, rec, values) =>
+  Object.fromEntries(
+    Object.entries(values || {}).map(([fieldId, value]) => [
+      fieldId,
+      normalizeRecordFieldValue(N, rec, fieldId, value)
+    ])
+  );
+
+const setRecordValues = (N, rec, values, skipFieldIds = new Set()) => {
   Object.keys(values || {}).forEach((fieldId) => {
     const value = values[fieldId];
     if (value !== undefined && !skipFieldIds.has(fieldId)) {
-      rec.setValue({ fieldId, value });
+      rec.setValue({
+        fieldId,
+        value: normalizeRecordFieldValue(N, rec, fieldId, value)
+      });
     }
   });
 };
@@ -277,7 +330,7 @@ const createRecord = (N, args = {}) => {
       : {})
   });
 
-  setRecordValues(rec, values);
+  setRecordValues(N, rec, values);
 
   const id = rec.save({
     enableSourcing: args.enableSourcing !== false,
@@ -301,10 +354,17 @@ const updateRecordFields = (N, args = {}) => {
   if (!id) throw new Error("recordId is required.");
 
   const values = assertFieldValueMap(args.values ?? args.fieldValues);
+  const rec = record.load({
+    type,
+    id,
+    isDynamic: false
+  });
+  const normalizedValues = normalizeRecordValues(N, rec, values);
+
   const updatedId = record.submitFields({
     type,
     id,
-    values,
+    values: normalizedValues,
     options: {
       enableSourcing: args.enableSourcing !== false,
       ignoreMandatoryFields: args.ignoreMandatoryFields === true
@@ -616,6 +676,20 @@ const extractCustomRecordFieldIdFromHtml = (html) => {
   return null;
 };
 
+const extractScriptFieldIdFromHtml = (html) => {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const idInput = doc.querySelector('input[name="id"]');
+  if (idInput && /^\d+$/.test(idInput.value)) return idInput.value;
+
+  const urlMatch = html.match(/scriptcustfield\.nl\?[^"'<>]*[?&]id=(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+
+  const scrollMatch = html.match(/[?&]scrollid=(\d+)/i);
+  if (scrollMatch) return scrollMatch[1];
+
+  return null;
+};
+
 const extractNetSuiteFormError = (html) => {
   const doc = new DOMParser().parseFromString(html, "text/html");
   const selectors = [
@@ -676,6 +750,36 @@ const buildCustomRecordFieldValues = (args = {}) => {
 
   if (values.scriptid !== undefined) {
     values.scriptid = normalizeMetadataScriptId(values.scriptid, "custrecord");
+  }
+
+  if (values.selectrecordtype !== undefined) {
+    values.selectrecordtype = normalizeSelectRecordTypeReference(
+      values.selectrecordtype
+    );
+  }
+
+  return values;
+};
+
+const buildScriptFieldValues = (args = {}) => {
+  const values = {
+    ...(args.label !== undefined ? { label: args.label } : {}),
+    ...(args.scriptId !== undefined ? { scriptid: args.scriptId } : {}),
+    ...(args.fieldType !== undefined ? { fieldtype: args.fieldType } : {}),
+    ...(args.selectRecordType !== undefined
+      ? { selectrecordtype: args.selectRecordType }
+      : {}),
+    ...(args.description !== undefined
+      ? { description: args.description }
+      : {}),
+    ...(args.storeValue !== undefined ? { storevalue: args.storeValue } : {}),
+    ...(args.fieldValues && typeof args.fieldValues === "object"
+      ? args.fieldValues
+      : {})
+  };
+
+  if (values.scriptid !== undefined) {
+    values.scriptid = normalizeMetadataScriptId(values.scriptid, "custscript");
   }
 
   if (values.selectrecordtype !== undefined) {
@@ -765,6 +869,33 @@ WHERE
   }
 };
 
+const findExistingScriptField = async (N, fieldValues) => {
+  const expectedScriptId = getMetadataScriptId(
+    fieldValues.scriptid,
+    "CUSTSCRIPT"
+  );
+  if (!expectedScriptId) return null;
+
+  const sql = `
+SELECT
+  InternalID,
+  Name,
+  ScriptID
+FROM
+  CustomField
+WHERE
+  UPPER(ScriptID) = UPPER(${sqlLiteral(expectedScriptId)})
+  AND ROWNUM <= 1
+`;
+
+  try {
+    return await firstSuiteQLRow(N, sql);
+  } catch (err) {
+    console.warn("[createScriptField] Existing field lookup failed:", err);
+    return null;
+  }
+};
+
 const createCustomRecordType = async (N, args = {}) => {
   const { record } = N;
   const customFields = Array.isArray(args.customFields)
@@ -802,7 +933,7 @@ const createCustomRecordType = async (N, args = {}) => {
     type: "customrecordtype",
     isDynamic: false
   });
-  setRecordValues(customRecordType, recordValues);
+  setRecordValues(N, customRecordType, recordValues);
   const customRecordTypeId = customRecordType.save();
 
   return {
@@ -1212,6 +1343,363 @@ const createCustomRecordField = async (N, args = {}) => {
   };
 };
 
+const createScriptField = async (N, args = {}) => {
+  const { runtime, url } = N;
+  const scriptInternalId = String(
+    args.scriptInternalId ?? args.scriptRecordId ?? args.parentScriptId ?? ""
+  ).trim();
+  if (!scriptInternalId) {
+    throw new Error("scriptInternalId is required.");
+  }
+
+  const fieldValues = buildScriptFieldValues(args);
+  if (!fieldValues.fieldtype) {
+    throw new Error(
+      "fieldType is required. Use the same values returned by GET_CUSTOM_RECORD_FIELD_TYPES."
+    );
+  }
+
+  const existing = await findExistingScriptField(N, fieldValues);
+  if (existing) {
+    return {
+      success: true,
+      existed: true,
+      id: existing.internalid ?? existing.InternalID,
+      recordType: "scriptcustomfield",
+      scripttype: scriptInternalId,
+      existing,
+      fieldValues,
+      note: "A matching script field already exists; returning its ID instead of creating a duplicate."
+    };
+  }
+
+  const requestedFieldType = fieldValues.fieldtype;
+  let resolvedFieldType = normalizeCustomRecordFieldUiType(requestedFieldType);
+  fieldValues.fieldtype = resolvedFieldType;
+
+  const domain = url?.resolveDomain
+    ? url.resolveDomain({ hostType: url.HostType.APPLICATION })
+    : window.location.host;
+  const scriptUrl = `https://${domain}/app/common/scripting/script.nl?id=${encodeURIComponent(
+    scriptInternalId
+  )}`;
+  const { accountId, csrfToken } = window.getNetsiteParams();
+  const currentUser = runtime?.getCurrentUser ? runtime.getCurrentUser() : {};
+  const ownerId = String(currentUser.id ?? "");
+  const ownerName = currentUser.name || "";
+  const scriptId = fieldValues.scriptid;
+  const fieldTypeText =
+    CUSTOM_RECORD_FIELD_UI_LABELS[resolvedFieldType] || resolvedFieldType;
+  const storeValue =
+    fieldValues.storevalue === undefined
+      ? "T"
+      : fieldValues.storevalue
+        ? "T"
+        : "F";
+  let selectRecordTypeFallbackNote = null;
+  if (
+    (resolvedFieldType === "SELECT" || resolvedFieldType === "MULTISELECT") &&
+    (fieldValues.selectrecordtype === undefined ||
+      fieldValues.selectrecordtype === null ||
+      fieldValues.selectrecordtype === "")
+  ) {
+    selectRecordTypeFallbackNote =
+      "fieldType was SELECT/MULTISELECT but no selectRecordType was provided; defaulted to TEXT.";
+    resolvedFieldType = "TEXT";
+    fieldValues.fieldtype = "TEXT";
+  }
+
+  const resolvedSelectRecordType =
+    resolvedFieldType === "SELECT" || resolvedFieldType === "MULTISELECT"
+      ? await resolveCustomFieldSelectRecordType(
+          N,
+          fieldValues.selectrecordtype
+        )
+      : null;
+  if (resolvedSelectRecordType?.value) {
+    fieldValues.selectrecordtype = resolvedSelectRecordType.value;
+  }
+
+  const params = new URLSearchParams({
+    submitter: "Save",
+    label: fieldValues.label ?? "",
+    label_send: fieldValues.label ?? "",
+    scriptid: scriptId ?? "",
+    fieldid: scriptId ?? "",
+    "nsutils-automated-ids": "on",
+    inpt_owner: ownerName,
+    owner: ownerId,
+    description: fieldValues.description ?? "",
+    inpt_fieldtype: fieldTypeText,
+    fieldtype: resolvedFieldType,
+    storevalue: storeValue,
+    storevalue_send: storeValue,
+    inpt_setting: " ",
+    setting: "",
+    _eml_nkey_: `${accountId}~${ownerId}~${currentUser.role ?? ""}~N`,
+    _multibtnstate_: "",
+    selectedtab: "DISPLAY",
+    nsapiPI: "",
+    nsapiSR: "",
+    nsapiVF: "",
+    nsapiFC: "",
+    nsapiPS: "",
+    nsapiVI: "",
+    nsapiVD: "",
+    nsapiPD: "",
+    nsapiVL: "",
+    nsapiRC: "",
+    nsapiLI: "",
+    nsapiLC: "",
+    nsapiCT: Date.now().toString(),
+    nsbrowserenv: "istop=T",
+    type: "custscriptfield",
+    id: "",
+    externalid: "",
+    whence: `/app/common/scripting/script.nl?id=${scriptInternalId}`,
+    customwhence: "",
+    entryformquerystring: `scripttype=${scriptInternalId}`,
+    _csrf: csrfToken,
+    originchannel: "",
+    fldcurrenttype: resolvedFieldType,
+    originalfieldtype: "",
+    originalselectrecordtype: "",
+    fldselectishierarchical: "F",
+    fldselectislist: "",
+    fldcurselrectype: "",
+    fldcurrstored: "",
+    showinlist: "F",
+    inactive: "F",
+    enabletextenhance: "F",
+    insertbefore: "",
+    subtab: "",
+    fldtabsection: "",
+    displaytype: "",
+    fldsizelabel: "",
+    displaywidth: "",
+    displayheight: "",
+    applyformatting: "T",
+    isunformattedcurrency: "F",
+    help: "",
+    parentsubtab: "",
+    linktext: "",
+    showhierarchy: "F",
+    ismandatory: "F",
+    checkspelling: "F",
+    maxlength: "",
+    minvalue: "",
+    maxvalue: "",
+    defaultchecked: "F",
+    defaultvalue: "",
+    defaultvaluerte: "",
+    isformula: "F",
+    defaultselection: "",
+    dynamicdefault: "",
+    onparentdelete: "NO_ACTION",
+    sourcelist: "",
+    sourcefrom: "",
+    sourcefilterby: "",
+    sourcefromtype: "",
+    sourcefromtypedisplay: "",
+    sourcefromrecordtype: "",
+    sourcefromrecordtypedisplay: "",
+    sourcefilterbyrecordtype: "",
+    sourcefilterbyrecordtypedisplay: "",
+    sourcelistrecordtype: "",
+    sourcelistrecordtypedisplay: "",
+    sourcefilterreferencedbycount: "",
+    staticfieldtype: "",
+    staticlistrecordtype: "",
+    usedassource: "",
+    customsegment: "",
+    scripttype: scriptInternalId,
+    accesslevel: "2",
+    searchlevel: "2",
+    label_term_ref: "",
+    colreflabel: "",
+    help_term_ref: "",
+    colrefhelp: "",
+    aidescription: "",
+    submitted: "T",
+    formdisplayview: "NONE",
+    _button: "",
+    customfieldfilterfields:
+      "fldfilter_display\x01fldfilter\x01fldfiltertype\x01fldfilterchecked\x01fldfiltercomparetype\x01fldfilterval\x01fldfiltersel_display\x01fldfiltersel\x01fldfiltersel_labels\x01fldfilternotnull\x01fldfilternull\x01fldcomparefield_display\x01fldcomparefield\x01fldselecttype",
+    customfieldfilterflags:
+      "8\x011\x010\x010\x010\x010\x018\x010\x01\x010\x010\x018\x010\x010",
+    customfieldfilterfieldsets:
+      "\x01\x01\x01\x01\x01\x01\x01\x01customfieldfilter.fldfilter\x01\x01\x01\x01\x01",
+    customfieldfiltertypes:
+      "text\x01integer\x01text\x01checkbox\x01select\x01text\x01textarea\x01slaveselect\x01text\x01checkbox\x01checkbox\x01text\x01slaveselect\x01integer",
+    customfieldfilterorigtypes:
+      "\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01",
+    customfieldfilterparents:
+      "selectrecordtype\x01selectrecordtype\x01customfieldfilter.fldfilter\x01\x01\x01\x01customfieldfilter.fldfilter\x01customfieldfilter.fldfilter\x01\x01\x01\x01customfieldfilter.fldfilter\x01customfieldfilter.fldfilter\x01",
+    customfieldfilterlabels:
+      "Filter Using\x01\x01\x01Is Checked\x01Compare Type\x01Compare Value to\x01Value Is\x01\x01\x01Is Not Empty\x01Is Empty\x01Compare to Field\x01\x01",
+    customfieldfilterdata: "",
+    nextcustomfieldfilteridx: "1",
+    customfieldfiltervalid: "T",
+    customfieldfilterloaded: "F",
+    roleaccessfields: "role\x01accesslevel\x01searchlevel",
+    roleaccessflags: "1\x011\x011",
+    roleaccessfieldsets: "\x01\x01",
+    roleaccesstypes: "select\x01select\x01select",
+    roleaccessorigtypes: "\x01\x01",
+    roleaccessparents: "\x01\x01",
+    roleaccesslabels: "Role\x01Access Level\x01Level for Search/Reporting",
+    roleaccessdata: "",
+    nextroleaccessidx: "1",
+    roleaccessvalid: "T",
+    roleaccessloaded: "F",
+    deptaccessfields: "dept\x01accesslevel\x01searchlevel",
+    deptaccessflags: "1\x011\x011",
+    deptaccessfieldsets: "\x01\x01",
+    deptaccesstypes: "select\x01select\x01select",
+    deptaccessorigtypes: "\x01\x01",
+    deptaccessparents: "\x01\x01",
+    deptaccesslabels:
+      "Department\x01Access Level\x01Level for Search/Reporting",
+    deptaccessdata: "",
+    nextdeptaccessidx: "1",
+    deptaccessvalid: "T",
+    deptaccessloaded: "F",
+    subaccessfields: "sub\x01accesslevel\x01searchlevel",
+    subaccessflags: "1\x011\x011",
+    subaccessfieldsets: "\x01\x01",
+    subaccesstypes: "select\x01select\x01select",
+    subaccessorigtypes: "\x01\x01",
+    subaccessparents: "\x01\x01",
+    subaccesslabels: "Subsidiary\x01Access Level\x01Level for Search/Reporting",
+    subaccessdata: "",
+    nextsubaccessidx: "1",
+    subaccessvalid: "T",
+    subaccessloaded: "F",
+    translationsfields: "locale\x01language\x01label\x01help",
+    translationsflags: "0\x010\x014\x014",
+    translationsfieldsets: "\x01\x01\x01",
+    translationstypes: "text\x01text\x01text\x01textarea",
+    translationsorigtypes: "\x01\x01\x01",
+    translationsparents: "\x01\x01\x01",
+    translationslabels: "\x01Language\x01Label\x01Help",
+    translationsdata:
+      "en\x01English (International)\x01\x01\x02fr_FR\x01French (France)\x01\x01\x02de_DE\x01German\x01\x01\x02it_IT\x01Italian\x01\x01",
+    nexttranslationsidx: "5",
+    translationsvalid: "T",
+    translationssortidx: "0",
+    translationssorttype: "TEXT",
+    translationssortdir: "UP",
+    translationssortname: "language",
+    translationssort2dir: "",
+    translationssort2name: ""
+  });
+
+  if (fieldValues.selectrecordtype !== undefined) {
+    setIfPresent(params, "selectrecordtype", fieldValues.selectrecordtype);
+    setIfPresent(params, "fldcurselrectype", fieldValues.selectrecordtype);
+    setIfPresent(params, "fldselectislist", "T");
+    setIfPresent(params, "staticlistrecordtype", fieldValues.selectrecordtype);
+  } else if (resolvedFieldType === "SELECT" || resolvedFieldType === "MULTISELECT") {
+    throw new Error(
+      "selectRecordType is required when fieldType is SELECT or MULTISELECT. " +
+        "Call GET_CUSTOM_RECORD_SELECT_RECORD_TYPES and use a returned value."
+    );
+  }
+
+  Object.entries(fieldValues).forEach(([fieldId, value]) => {
+    if (
+      value !== undefined &&
+      ![
+        "label",
+        "scriptid",
+        "description",
+        "fieldtype",
+        "storevalue"
+      ].includes(fieldId)
+    ) {
+      setIfPresent(params, fieldId, value);
+    }
+  });
+
+  const response = await fetch(
+    `https://${domain}/app/common/custom/scriptcustfield.nl`,
+    {
+      method: "POST",
+      mode: "cors",
+      credentials: "include",
+      headers: {
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": "it-IT,it;q=0.6",
+        "cache-control": "max-age=0",
+        "content-type": "application/x-www-form-urlencoded",
+        priority: "u=0, i",
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1"
+      },
+      referrer: `${scriptUrl}&e=T`,
+      body: params.toString()
+    }
+  );
+
+  const html = await response.text();
+  if (!response.ok) {
+    throw new Error(`Script field form save failed: HTTP ${response.status}`);
+  }
+
+  const formError = extractNetSuiteFormError(html);
+  const id = extractScriptFieldIdFromHtml(html);
+  if (!id && formError) {
+    throw new Error(`Script field form save failed: ${formError}`);
+  }
+  if (!id) {
+    throw new Error(
+      `Script field form save completed but no field ID was found in the response. ${html
+        .replace(/\s+/g, " ")
+        .slice(0, 500)}`
+    );
+  }
+
+  return {
+    success: true,
+    existed: false,
+    id,
+    recordType: "scriptcustomfield",
+    scripttype: scriptInternalId,
+    url: `https://${domain}/app/common/custom/scriptcustfield.nl?scripttype=${encodeURIComponent(
+      scriptInternalId
+    )}&e=T&id=${encodeURIComponent(id)}`,
+    parentUrl: scriptUrl,
+    fieldValues,
+    resolved: {
+      fieldtype: {
+        requested: requestedFieldType,
+        value: resolvedFieldType
+      },
+      ...(selectRecordTypeFallbackNote
+        ? {
+            selectrecordtypeFallback: {
+              note: selectRecordTypeFallbackNote
+            }
+          }
+        : {}),
+      ...(resolvedSelectRecordType
+        ? {
+            selectrecordtype: {
+              requested: args.selectRecordType ?? args.fieldValues?.selectrecordtype,
+              value: resolvedSelectRecordType.value,
+              source: resolvedSelectRecordType.source,
+              matched: resolvedSelectRecordType.matched
+            }
+          }
+        : {})
+    }
+  };
+};
+
 const findCustomRecordFieldToInspect = async (N, args = {}) => {
   if (args.customFieldId) {
     return { internalid: args.customFieldId };
@@ -1347,19 +1835,22 @@ const handlers = {
     console.log("Run Quick Script action received", { mode });
     try {
       // Pass mode to runQuickScript
-      await window.runQuickScript(modules, { code, requestId, mode });
+      const result = await window.runQuickScript(modules, { code, requestId, mode });
 
       // For streaming, don't return anything here - data flows through postMessage
       if (mode === "stream") {
         return null;
       }
 
-      // For normal mode, return initial log
-      return { type: "log", values: ["Script execution started"] };
+      return result;
     } catch (err) {
-      return [
-        { type: "error", values: ["Script execution error: " + err.message] }
-      ];
+      return {
+        result: null,
+        error: err?.message || String(err),
+        logs: [
+          { type: "error", values: ["Script execution error: " + (err?.message || String(err))] }
+        ]
+      };
     }
   },
   RUN_QUICK_SCRIPT_SERVER: async ({
@@ -1439,6 +1930,41 @@ const handlers = {
   SCRIPT_DEPLOYMENT_URL: async ({ modules, payload: { deployment } }) => {
     console.log("Script Deployment URL action received");
     return window.getScriptDeploymentUrl(modules, { deployment });
+  },
+  EXECUTE_SCRIPT_DEPLOYMENT: async ({
+    modules,
+    payload: {
+      scriptId,
+      scriptName,
+      scriptType,
+      scriptInternalId,
+      deploymentScriptId,
+      deploymentNumber,
+      status,
+      logLevel,
+      isDeployed,
+      deploymentRecordId
+    }
+  }) => {
+    console.log("Execute Script Deployment action received", {
+      scriptId,
+      scriptType,
+      scriptInternalId,
+      deploymentScriptId,
+      deploymentRecordId
+    });
+    return window.executeScriptDeployment(modules, {
+      scriptId,
+      scriptName,
+      scriptType,
+      scriptInternalId,
+      deploymentScriptId,
+      deploymentNumber,
+      status,
+      logLevel,
+      isDeployed,
+      deploymentRecordId
+    });
   },
   SUITELET_URL: async ({
     modules,
@@ -1548,6 +2074,10 @@ const handlers = {
       { name, scriptId, fileId, scriptType, description, apiVersion },
       csrfToken
     );
+  },
+  CREATE_SCRIPT_DEPLOYMENT: async ({ modules, payload }) => {
+    console.log("Create Script Deployment action received", payload);
+    return await window.createScriptDeployRecord(modules, payload);
   },
   GET_ALL_RECORD_TYPES: async ({ modules }) => {
     console.log("Get All Record Types action received");
@@ -1750,6 +2280,10 @@ const handlers = {
   CREATE_CUSTOM_RECORD_FIELD: async ({ modules, payload }) => {
     console.log("Create Custom Record Field action received");
     return createCustomRecordField(modules, payload);
+  },
+  CREATE_SCRIPT_FIELD: async ({ modules, payload }) => {
+    console.log("Create Script Field action received");
+    return createScriptField(modules, payload);
   },
   FIND_FOLDER: async ({ modules, payload: { id, name } }) => {
     console.log("Find Folder action received", { id, name });

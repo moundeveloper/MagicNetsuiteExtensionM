@@ -124,6 +124,33 @@ export class NormalRequestHandler {
     const { payload } = event.data;
     console.log(`[Request ${this.requestId}] Response received`, payload);
 
+    if (payload.event && !["done", "error"].includes(payload.event)) {
+      return;
+    }
+
+    if (payload.event === "done") {
+      this.sendResponse({
+        requestId: this.requestId,
+        status: "ok",
+        message: {
+          result: payload.result,
+          logs: payload.logs || []
+        }
+      });
+      this.cleanup();
+      return;
+    }
+
+    if (payload.event === "error") {
+      this.sendResponse({
+        requestId: this.requestId,
+        status: "error",
+        message: payload.error || "Request failed"
+      });
+      this.cleanup();
+      return;
+    }
+
     this.sendResponse(payload);
     this.cleanup();
   }

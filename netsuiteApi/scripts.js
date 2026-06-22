@@ -386,6 +386,229 @@ window.clearScriptExecutionLogs = async (
   };
 };
 
+const getStatusLabel = (status) => {
+  const normalized = String(status || "NOTSCHEDULED").toUpperCase();
+  const labels = {
+    NOTSCHEDULED: "Not Scheduled",
+    SCHEDULED: "Scheduled",
+    RELEASED: "Released",
+    TESTING: "Testing"
+  };
+  return labels[normalized] || normalized;
+};
+
+const getLogLevelLabel = (logLevel) => {
+  const normalized = String(logLevel || "DEBUG").toUpperCase();
+  const labels = {
+    DEBUG: "Debug",
+    AUDIT: "Audit",
+    ERROR: "Error",
+    EMERGENCY: "Emergency"
+  };
+  return labels[normalized] || normalized;
+};
+
+const pad2 = (value) => String(value).padStart(2, "0");
+
+const getNetSuiteDateParts = () => {
+  const now = new Date();
+  const monthUpper = now
+    .toLocaleString("en-US", { month: "long" })
+    .toUpperCase();
+  const monthTitle = now.toLocaleString("en-US", { month: "long" });
+  const day = now.getDate();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const startTime = `${pad2(now.getHours())}${pad2(now.getMinutes())}`;
+
+  return {
+    day,
+    month,
+    year,
+    startTime,
+    startDate: `${day}-${monthUpper}-${year}`,
+    endByDate: `${day}-${monthTitle}-${year}`,
+    recurringEvent: JSON.stringify({
+      eventType: "SingleEvent",
+      startDate: `${pad2(month)}/${pad2(day)}/${year}`,
+      startTime
+    })
+  };
+};
+
+window.executeScriptDeployment = async (
+  N,
+  {
+    scriptId,
+    scriptName,
+    scriptType,
+    scriptInternalId,
+    deploymentScriptId,
+    deploymentNumber,
+    status,
+    logLevel,
+    isDeployed,
+    deploymentRecordId
+  }
+) => {
+  const { runtime, url } = N;
+  const deploymentId = String(deploymentRecordId ?? "").trim();
+  const internalScriptId = String(scriptInternalId ?? "").trim();
+
+  if (!deploymentId) {
+    throw new Error("A deployment record ID is required to run this script.");
+  }
+
+  if (isDeployed === false) {
+    throw new Error("This deployment is not deployed.");
+  }
+
+  const { csrfToken, accountId } = getNetsiteParams();
+  const { id, role } = runtime.getCurrentUser();
+  const domain = url.resolveDomain({ hostType: url.HostType.APPLICATION });
+  const endpoint = `https://${domain}/app/common/scripting/scriptrecord.nl`;
+  const editUrl = `${endpoint}?id=${encodeURIComponent(deploymentId)}&whence=&e=T`;
+  const dateParts = getNetSuiteDateParts();
+  const normalizedStatus = String(status || "NOTSCHEDULED").toUpperCase();
+  const normalizedLogLevel = String(logLevel || "DEBUG").toUpperCase();
+  const deployNumber = String(deploymentNumber || "1");
+
+  const body = new URLSearchParams({
+    submitexecute: "Save and Execute",
+    script: internalScriptId,
+    title: scriptName || scriptId || "",
+    isdeployed: "T",
+    inpt_status: getStatusLabel(normalizedStatus),
+    status: normalizedStatus,
+    inpt_loglevel: getLogLevelLabel(normalizedLogLevel),
+    loglevel: normalizedLogLevel,
+    inpt_priority: "Standard",
+    priority: "2",
+    _eml_nkey_: `${accountId}~${id}~${role}~N`,
+    _multibtnstate_: "EDIT_SCRIPTRECORD:submitter:submitexecute",
+    selectedtab: "",
+    nsapiPI: "",
+    nsapiSR: "",
+    nsapiVF: "",
+    nsapiFC: "",
+    nsapiPS: "",
+    nsapiVI: "",
+    nsapiVD: "",
+    nsapiPD: "",
+    nsapiVL: "",
+    nsapiRC: "",
+    nsapiLI: "",
+    nsapiLC: "",
+    nsapiCT: Date.now().toString(),
+    nsbrowserenv: "istop=T",
+    wfPI: "",
+    wfSR: "",
+    wfVF: "",
+    wfFC: "",
+    wfPS: "",
+    type: "scriptrecord",
+    id: deploymentId,
+    externalid: "",
+    whence: "",
+    customwhence: "",
+    entryformquerystring: `id=${deploymentId}&e=T`,
+    _csrf: csrfToken || "",
+    wfinstances: "",
+    primarykey: deploymentId,
+    deploymentid: deployNumber,
+    version: "1",
+    hascodeaccess: "T",
+    processorpool: "script",
+    queueid: "",
+    processormodelversion: "2",
+    hiddendeprecatedstatus: normalizedStatus,
+    frequency: "NONE",
+    period: "0",
+    recurrencedowmask: "",
+    recurrencedow: "0",
+    recurrencedowim: "0",
+    _frequency: "NONE",
+    _day_mode: "EVERY",
+    _day_period: "1",
+    _week_period: "1",
+    _month_mode: "DOM",
+    _month_dom: String(dateParts.day),
+    _month_dom_period: "1",
+    _year_mode: "DOM",
+    _year_month: String(dateParts.month),
+    _year_dom: String(dateParts.day),
+    _week_dow_1: "F",
+    _week_dow_2: "T",
+    _week_dow_3: "F",
+    _week_dow_4: "F",
+    _week_dow_5: "F",
+    _week_dow_6: "F",
+    _week_dow_7: "F",
+    _month_dowim: "3",
+    _month_dow: "2",
+    _month_dowim_period: "1",
+    _year_dowim: "3",
+    _year_dow: "2",
+    _year_dowim_month: String(dateParts.month),
+    startdate: dateParts.startDate,
+    starttime: dateParts.startTime,
+    recurrenceminutes: "",
+    endbydate: dateParts.endByDate,
+    noenddate: "F",
+    recurringevent: dateParts.recurringEvent,
+    submitted: "T",
+    formdisplayview: "NONE",
+    _button: "",
+    scriptnoteloaded: "T",
+    scriptnotedotted: "T"
+  });
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      priority: "u=0, i",
+      "sec-ch-ua": '"Brave";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "sec-gpc": "1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer: editUrl,
+    body: body.toString()
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `NetSuite script execution failed (${response.status}): ${text
+        .replace(/\s+/g, " ")
+        .slice(0, 300)}`
+    );
+  }
+
+  return {
+    executed: true,
+    transport: "scriptrecord.nl",
+    status: response.status,
+    deploymentRecordId: deploymentId,
+    scriptInternalId: internalScriptId || null,
+    deploymentScriptId: deploymentScriptId || null,
+    bodyPreview: text.slice(0, 500)
+  };
+};
+
 window.getScriptDeploymentUrl = async (N, { deployment }) => {
   console.log("Deployment ID:", deployment);
 
@@ -694,35 +917,57 @@ window.createScriptRecord = async (
  * @see https://system.netsuite.com/app/common/scripting/scriptrecord.nl
  */
 window.createScriptDeployRecord = async (
-  { runtime },
+  { runtime, url },
   {
     name,
     scriptId,
+    deploymentScriptId,
     scriptInternalId,
     title,
     status = "RELEASED",
-    logLevel = "DEBUG"
+    logLevel = "DEBUG",
+    runAsRole
   }
 ) => {
   const { csrfToken, accountId } = getNetsiteParams();
 
   const { id, role } = runtime.getCurrentUser();
+  const domain = url?.resolveDomain
+    ? url.resolveDomain({ hostType: url.HostType.APPLICATION })
+    : window.location.hostname;
+  const normalizedStatus = String(status || "RELEASED").toUpperCase();
+  const normalizedLogLevel = String(logLevel || "DEBUG").toUpperCase();
+  const normalizedDeploymentScriptId = normalizeDeploymentScriptId(
+    deploymentScriptId ?? scriptId
+  );
+  const scriptRecordId = String(scriptInternalId ?? "").trim();
+  const deploymentTitle =
+    String(title ?? name ?? normalizedDeploymentScriptId).trim() ||
+    normalizedDeploymentScriptId;
+
+  if (!scriptRecordId) {
+    throw new Error("scriptInternalId is required to create a deployment.");
+  }
+
+  if (!normalizedDeploymentScriptId) {
+    throw new Error("deploymentScriptId is required to create a deployment.");
+  }
 
   const body = new URLSearchParams({
     submitter: "Save",
-    script: scriptInternalId,
-    title: title ?? name,
-    scriptid: scriptId,
+    script: scriptRecordId,
+    title: deploymentTitle,
+    scriptid: normalizedDeploymentScriptId,
     "nsutils-automated-ids": "on",
     isdeployed: "T",
-    inpt_status: "Released",
-    status,
+    inpt_status: getStatusLabel(normalizedStatus),
+    status: normalizedStatus,
     inpt_eventtype: " ",
     eventtype: "",
-    inpt_loglevel: "Debug",
-    loglevel: logLevel,
+    inpt_loglevel: getLogLevelLabel(normalizedLogLevel),
+    loglevel: normalizedLogLevel,
     inpt_runasrole: "Administrator",
-    runasrole: role,
+    runasrole: runAsRole ?? role,
     _eml_nkey_: `${accountId}~${id}~${role}~N`,
     _multibtnstate_: "",
     selectedtab: "",
@@ -748,9 +993,9 @@ window.createScriptDeployRecord = async (
     type: "scriptrecord",
     id: "",
     externalid: "",
-    whence: `/app/common/scripting/script.nl?id=${scriptInternalId}`,
+    whence: `/app/common/scripting/script.nl?id=${scriptRecordId}`,
     customwhence: "",
-    entryformquerystring: `scripttype=${scriptInternalId}`,
+    entryformquerystring: `scripttype=${scriptRecordId}`,
     _csrf: csrfToken,
     wfinstances: "",
     primarykey: "",
@@ -793,7 +1038,7 @@ window.createScriptDeployRecord = async (
   });
 
   const response = await fetch(
-    `https://${window.location.hostname}/app/common/scripting/scriptrecord.nl`,
+    `https://${domain}/app/common/scripting/scriptrecord.nl`,
     {
       method: "POST",
       mode: "cors",
@@ -813,9 +1058,11 @@ window.createScriptDeployRecord = async (
         "sec-fetch-site": "same-origin",
         "sec-fetch-user": "?1",
         "sec-gpc": "1",
-        "upgrade-insecure-requests": "1",
-        referer: `https://${window.location.hostname}/app/common/scripting/scriptrecord.nl?scripttype=${scriptInternalId}`
+        "upgrade-insecure-requests": "1"
       },
+      referrer: `https://${domain}/app/common/scripting/scriptrecord.nl?scripttype=${encodeURIComponent(
+        scriptRecordId
+      )}`,
       body: body.toString()
     }
   );
@@ -827,19 +1074,48 @@ window.createScriptDeployRecord = async (
     response
   );
 
+  if (!response.ok) {
+    throw new Error(
+      `createScriptDeployRecord: HTTP ${response.status}: ${text
+        .replace(/\s+/g, " ")
+        .slice(0, 300)}`
+    );
+  }
+
+  const deploymentRecordId = extractDeploymentRecordIdFromHtml(text);
   const deploymentId = extractDeploymentIdFromHtml(text);
   const deployUrl = extractDeployUrlFromHtml(text);
 
-  console.log("createScriptDeployment", { deploymentId, deployUrl });
+  console.log("createScriptDeployment", {
+    deploymentRecordId,
+    deploymentId,
+    deployUrl
+  });
 
   return {
+    success: true,
     status: response.status,
-    body: text,
+    transport: "scriptrecord.nl",
+    scriptInternalId: scriptRecordId,
+    deploymentScriptId: normalizedDeploymentScriptId,
+    deploymentRecordId,
     deploymentId,
     deployUrl,
-    response
+    bodyPreview: text.slice(0, 500)
   };
 };
+
+function normalizeDeploymentScriptId(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const raw = String(value).trim();
+  if (!raw) return "";
+  let suffix = raw;
+  if (suffix.toLowerCase().startsWith("customdeploy")) {
+    suffix = suffix.slice("customdeploy".length);
+  }
+  suffix = suffix.replace(/^_+/, "");
+  return `_${suffix}`;
+}
 
 /**
  * Extract the deployment URL from NetSuite's script deployment record HTML response.
@@ -897,6 +1173,34 @@ function extractDeploymentIdFromHtml(html) {
 
   const m = html.match(/deploymentid[="](\d+)/);
   if (m) return m[1];
+
+  return null;
+}
+
+function extractDeploymentRecordIdFromHtml(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+
+  const idInput = doc.querySelector('input[name="id"]');
+  if (idInput && /^\d+$/.test(idInput.value)) return idInput.value;
+
+  const primaryKeyInput = doc.querySelector('input[name="primarykey"]');
+  if (primaryKeyInput && /^\d+$/.test(primaryKeyInput.value)) {
+    return primaryKeyInput.value;
+  }
+
+  const scriptRecordLink = doc.querySelector(
+    'a[href*="/app/common/scripting/scriptrecord.nl?id="]'
+  );
+  if (scriptRecordLink) {
+    const m = scriptRecordLink.href.match(/[?&]id=(\d+)/);
+    if (m) return m[1];
+  }
+
+  const urlMatch = html.match(/scriptrecord\.nl\?[^"'<>]*[?&]id=(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+
+  const scrollMatch = html.match(/[?&]scrollid=(\d+)/i);
+  if (scrollMatch) return scrollMatch[1];
 
   return null;
 }

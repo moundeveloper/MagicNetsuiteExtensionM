@@ -65,7 +65,7 @@ window.checkMagicNetsuiteComponents = async ({ query }) => {
     if (suiteletScriptExists) {
       const deployments = (
         await query.runSuiteQL.promise({
-          query: `SELECT id FROM scriptdeployment WHERE script = ?`,
+          query: `SELECT primarykey AS id FROM scriptdeployment WHERE script = ?`,
           params: [script.id]
         })
       ).asMappedResults();
@@ -408,7 +408,7 @@ async function waitUntilMagicScriptExists(N) {
 async function waitUntilMagicDeploymentExists(N, scriptRecordId) {
   const [deployment] = await waitUntilSuiteQL(
     N,
-    `SELECT id FROM scriptdeployment WHERE script = ?`,
+    `SELECT primarykey AS id FROM scriptdeployment WHERE script = ?`,
     [String(scriptRecordId)],
     (rows) => rows.length > 0,
     "Suitelet deployment creation"

@@ -79,6 +79,16 @@ Text search (slow — use only when necessary):
   contact             Contact records
   customrecord_*      Custom record types — discover with suiteql_search_tables
 
+## SCRIPT DEPLOYMENT IDS
+The SuiteQL scriptdeployment table is unusual:
+  - scriptdeployment.id is NOT the deployment record internal ID used by the NetSuite record API or deployment URL tools.
+  - scriptdeployment.primarykey IS the actual scriptdeployment record internal ID.
+  - When a SuiteQL query result for scriptdeployment will be used with netsuite_load_record(recordType: "scriptdeployment"), netsuite_get_script_deployment_url, execute/deployment tools, or a NetSuite deployment URL, use primarykey.
+  - Select it explicitly and alias it clearly:
+      SELECT sd.primarykey AS deployment_record_id, sd.scriptid, sd.deploymentid
+      FROM scriptdeployment sd
+      WHERE ROWNUM <= 25
+
 ## RECORD-RELATED FILES AND REPORTS
 When the user asks for a report/file/document/PDF "for", "with", or "related to" a lead/customer/entity/transaction ID:
   - Treat the number as the record ID unless the user explicitly says "file ID".
@@ -1064,13 +1074,15 @@ const MCP_TOOL_DEFINITIONS = [
   },
   {
     name: "suiteql_execute_query",
-    description: "Execute a SuiteQL query. NEVER use LIMIT — it is not valid SuiteQL syntax and will error. Use ROWNUM in a WHERE clause to limit rows: WHERE ROWNUM <= 25",
+    description:
+      "Execute a SuiteQL query. NEVER use LIMIT — it is not valid SuiteQL syntax and will error. Use ROWNUM in a WHERE clause to limit rows: WHERE ROWNUM <= 25. IMPORTANT: when querying scriptdeployment, select primarykey; it is the actual deployment record internal ID. scriptdeployment.id is not.",
     inputSchema: {
       type: "object",
       properties: {
         sql: {
           type: "string",
-          description: "Valid SuiteQL query. Must use ROWNUM <= N for row limiting, never LIMIT."
+          description:
+            "Valid SuiteQL query. Must use ROWNUM <= N for row limiting, never LIMIT. For scriptdeployment, select primarykey when you need the deployment record internal ID."
         }
       },
       required: ["sql"]
@@ -1331,6 +1343,7 @@ const MCP_TOOL_DEFINITIONS = [
     description:
       "Create a NetSuite standard or custom record using SuiteScript record.create, Record.setValue, and Record.save. " +
       "Destructive: this creates data in the account. Pass recordType and a values object mapping body field IDs to values. " +
+      "Date fields are normalized automatically: DATE, DATETIME, and DATETIMETZ fields receive SuiteScript Date objects. " +
       "For custom records, recordType is the custom record script ID such as customrecord_my_type. This tool does not create sublist lines or subrecords.",
     inputSchema: {
       type: "object",
@@ -1368,6 +1381,7 @@ const MCP_TOOL_DEFINITIONS = [
     description:
       "Update body fields on an existing NetSuite record using SuiteScript record.submitFields. " +
       "Destructive: this modifies data in the account. This is for body fields only; NetSuite does not allow submitFields to update sublist line fields or subrecords. " +
+      "Date fields are normalized automatically: DATE, DATETIME, and DATETIMETZ fields receive SuiteScript Date objects. " +
       "Pass recordType, recordId, and a values object mapping field IDs to values.",
     inputSchema: {
       type: "object",
@@ -1501,6 +1515,46 @@ const MCP_TOOL_DEFINITIONS = [
         fieldValues: {
           type: "object",
           description: "Additional raw form fieldId-to-value pairs to include in the custreccustfield.nl POST. rectype is always set by the tool."
+        }
+      }
+    }
+  },
+  {
+    name: "netsuite_create_script_field",
+    description:
+      "Find or create a NetSuite script parameter field using the native scriptcustfield.nl form POST. " +
+      "Uses the same fieldType and selectRecordType values as custom record fields. " +
+      "The scriptId key accepts either 'custscript_my_param' or 'my_param' and is normalized to NetSuite's metadata suffix format.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptInternalId: {
+          type: "string",
+          description: "Internal ID of the parent script record; posted as scripttype."
+        },
+        scriptRecordId: {
+          type: "string",
+          description: "Alias for scriptInternalId."
+        },
+        label: { type: "string" },
+        scriptId: {
+          type: "string",
+          description: "Convenience value for the script parameter scriptid field. Passing 'custscript_my_param' or 'my_param' is normalized to '_my_param'."
+        },
+        fieldType: {
+          type: "string",
+          examples: CUSTOM_RECORD_FIELD_TYPE_HINTS,
+          description: "Convenience value for the fieldtype field. Uses the same values as netsuite_create_custom_record_field."
+        },
+        selectRecordType: {
+          type: "string",
+          description: "Convenience value for selectrecordtype when fieldType is SELECT or MULTISELECT."
+        },
+        description: { type: "string" },
+        storeValue: { type: "boolean" },
+        fieldValues: {
+          type: "object",
+          description: "Additional raw form fieldId-to-value pairs to include in the scriptcustfield.nl POST. scripttype is always set by the tool."
         }
       }
     }
@@ -1667,6 +1721,330 @@ const MCP_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "netsuite_create_folder",
+    description:
+      "Create a new folder in the NetSuite File Cabinet. Destructive: creates data. " +
+      "If no parentFolderId is provided, the tool uses -15 (SuiteScripts root). Returns the new folder ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Folder name to create."
+        },
+        parentFolderId: {
+          type: "number",
+          description: "Parent folder internal ID. Defaults to -15 (SuiteScripts root)."
+        }
+      },
+      required: ["name"]
+    }
+  },
+  {
+    name: "netsuite_upload_file",
+    description:
+      "Upload a file to the NetSuite File Cabinet. Destructive: creates a file. " +
+      "When called through the local MCP server, prefer localPath/localPaths/files so the MCP server reads and encodes local files for you. " +
+      "Use fileContent for generated text files or fileContentBase64 plus mimeType for already encoded binary files. " +
+      "If no folderId is provided, the tool uses -15 (SuiteScripts root).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPath: {
+          type: "string",
+          description: "Local filesystem path to upload. Supported by the local MCP server."
+        },
+        localPaths: {
+          type: "array",
+          items: { type: "string" },
+          description: "Multiple local filesystem paths to upload. Supported by the local MCP server."
+        },
+        files: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              localPath: {
+                type: "string",
+                description: "Local filesystem path to upload."
+              },
+              fileName: {
+                type: "string",
+                description: "Optional NetSuite file name override."
+              },
+              folderId: {
+                type: "number",
+                description: "Optional target folder override for this file."
+              },
+              mimeType: {
+                type: "string",
+                description: "Optional MIME type override."
+              }
+            },
+            required: ["localPath"]
+          },
+          description: "Batch upload specs. Supported by the local MCP server."
+        },
+        fileName: {
+          type: "string",
+          description: "Name of the file to upload, e.g. my_script.js. Required only for fileContent/fileContentBase64 mode."
+        },
+        fileContent: {
+          type: "string",
+          description: "Raw text content to upload."
+        },
+        fileContentBase64: {
+          type: "string",
+          description: "Base64 content for binary files. Use instead of fileContent."
+        },
+        mimeType: {
+          type: "string",
+          description: "Optional MIME type for base64 uploads."
+        },
+        folderId: {
+          type: "number",
+          description: "Target folder internal ID. Defaults to -15 (SuiteScripts root)."
+        }
+      },
+      required: ["fileName"]
+    }
+  },
+  {
+    name: "netsuite_update_file_content",
+    description:
+      "Replace the content of an existing NetSuite File Cabinet file. Destructive: modifies a file. " +
+      "For text/script files, pass fileId and fileContent. fileName, folderId, and mediaType are optional and will be looked up when omitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: {
+          type: "number",
+          description: "Internal ID of the File Cabinet file to update."
+        },
+        fileContent: {
+          type: "string",
+          description: "New raw text content for the file."
+        },
+        fileName: {
+          type: "string",
+          description: "Optional current file name. Looked up if omitted."
+        },
+        folderId: {
+          type: "number",
+          description: "Optional parent folder ID. Looked up if omitted."
+        },
+        mediaType: {
+          type: "string",
+          description: "Optional NetSuite media/file type such as JAVASCRIPT, PLAINTEXT, HTMLDOC, XMLDOC, JSON."
+        }
+      },
+      required: ["fileId", "fileContent"]
+    }
+  },
+  {
+    name: "netsuite_rename_file",
+    description:
+      "Rename an existing File Cabinet file without changing content. Destructive: modifies file metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: {
+          type: "number",
+          description: "Internal ID of the file to rename."
+        },
+        newName: {
+          type: "string",
+          description: "New file name."
+        },
+        folderId: {
+          type: "number",
+          description: "Optional current parent folder ID. Looked up if omitted."
+        }
+      },
+      required: ["fileId", "newName"]
+    }
+  },
+  {
+    name: "netsuite_rename_folder",
+    description:
+      "Rename an existing File Cabinet folder. Destructive: modifies folder metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folderId: {
+          type: "number",
+          description: "Internal ID of the folder to rename."
+        },
+        newName: {
+          type: "string",
+          description: "New folder name."
+        },
+        parentFolderId: {
+          type: "number",
+          description: "Optional parent folder ID. Looked up if omitted."
+        }
+      },
+      required: ["folderId", "newName"]
+    }
+  },
+  {
+    name: "netsuite_delete_file",
+    description:
+      "Delete a File Cabinet file. Destructive and irreversible unless NetSuite recovery applies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileId: {
+          type: "number",
+          description: "Internal ID of the file to delete."
+        },
+        folderId: {
+          type: "number",
+          description: "Optional current parent folder ID. Looked up if omitted."
+        }
+      },
+      required: ["fileId"]
+    }
+  },
+  {
+    name: "netsuite_delete_folder",
+    description:
+      "Delete a File Cabinet folder. Destructive. The folder must be deletable in NetSuite.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        folderId: {
+          type: "number",
+          description: "Internal ID of the folder to delete."
+        }
+      },
+      required: ["folderId"]
+    }
+  },
+  {
+    name: "netsuite_move_items",
+    description:
+      "Move File Cabinet files and/or folders from one folder to another. Destructive: changes file/folder locations.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        srcFolderId: {
+          type: "number",
+          description: "Source folder internal ID."
+        },
+        dstFolderId: {
+          type: "number",
+          description: "Destination folder internal ID."
+        },
+        fileIds: {
+          type: "array",
+          items: { type: "number" },
+          description: "File IDs to move."
+        },
+        folderIds: {
+          type: "array",
+          items: { type: "number" },
+          description: "Folder IDs to move."
+        }
+      },
+      required: ["srcFolderId", "dstFolderId"]
+    }
+  },
+  {
+    name: "netsuite_create_script_record",
+    description:
+      "Create a NetSuite Script record for an already-uploaded script file. Destructive: creates a script record. " +
+      "Common scriptType values: SCRIPTLET (Suitelet), RESTLET, USEREVENT, SCHEDULED, MAPREDUCE, CLIENT, PORTLET, WORKFLOWACTION.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Human-readable script name."
+        },
+        scriptId: {
+          type: "string",
+          description: "Script ID, e.g. customscript_my_script."
+        },
+        fileId: {
+          type: "number",
+          description: "Internal ID of the uploaded script file."
+        },
+        scriptType: {
+          type: "string",
+          description: "NetSuite script type constant. Defaults to SCRIPTLET."
+        },
+        description: {
+          type: "string",
+          description: "Optional script description."
+        },
+        apiVersion: {
+          type: "string",
+          description: "SuiteScript API version. Defaults to 2.1."
+        }
+      },
+      required: ["name", "scriptId", "fileId"]
+    }
+  },
+  {
+    name: "netsuite_create_script_deployment",
+    description:
+      "Create and deploy a NetSuite Suitelet script deployment for an existing script record. Destructive: creates a script deployment. " +
+      "Currently supports Suitelet deployments only. Pass the script record internal ID and a deployment script ID such as customdeploy_my_suitelet or my_suitelet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptInternalId: {
+          type: "number",
+          description: "Internal ID of the existing script record to deploy."
+        },
+        deploymentScriptId: {
+          type: "string",
+          description: "Deployment script ID, e.g. customdeploy_my_suitelet or my_suitelet. Normalized to NetSuite's metadata suffix format."
+        },
+        name: {
+          type: "string",
+          description: "Fallback deployment title when title is not provided."
+        },
+        title: {
+          type: "string",
+          description: "Display title for the deployment."
+        },
+        status: {
+          type: "string",
+          description: "Deployment status. Defaults to RELEASED. Supported values include RELEASED and TESTING."
+        },
+        logLevel: {
+          type: "string",
+          description: "Logging level. Defaults to DEBUG. Supported values include DEBUG, AUDIT, ERROR, and EMERGENCY."
+        },
+        runAsRole: {
+          type: "number",
+          description: "Optional internal role ID for the deployment's Run As Role. Defaults to the current user's role."
+        }
+      },
+      required: ["scriptInternalId", "deploymentScriptId"]
+    }
+  },
+  {
+    name: "netsuite_run_quick_script",
+    description:
+      "Run a small SuiteScript/JavaScript snippet in the authenticated NetSuite page context. " +
+      "Use this to quickly test N/* module calls or JavaScript expressions. Return values and console/N.log output are returned as { result, logs }. " +
+      "The snippet runs inside an async function with N modules destructured, so you can use await and modules such as record, search, query, runtime, file, log.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description:
+            "SuiteScript/JavaScript body to execute, e.g. \"console.log(runtime.getCurrentUser().id); return runtime.getCurrentUser().name;\""
+        }
+      },
+      required: ["code"]
+    }
+  },
+  {
     name: "netsuite_suitelet_stream_start",
     description:
       "Start an interactive Suitelet viewer session for the MCP App. Opens the provided NetSuite Suitelet URL, or uses the preferred NetSuite tab when no URL is provided.",
@@ -1762,6 +2140,12 @@ const MCP_TOOL_DEFINITIONS = [
       },
       required: ["url"]
     }
+  },
+  {
+    name: "netsuite_dump_cookies",
+    description:
+      "Return the current NetSuite session cookies (including HttpOnly auth cookies) read from a logged-in NetSuite browser tab via the debugger. Used to hand the real browser session to an external automated browser (Playwright) so it doesn't have to log in again. Requires a NetSuite tab to be open in the browser.",
+    inputSchema: { type: "object", properties: {} }
   },
   {
     name: "netsuite_suitelet_control_open",
@@ -1938,6 +2322,8 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteInspectCustomRecordField(args);
         } else if (name === "netsuite_create_custom_record_field") {
           result = await handleNetsuiteCreateCustomRecordField(args);
+        } else if (name === "netsuite_create_script_field") {
+          result = await handleNetsuiteCreateScriptField(args);
         } else if (name === "netsuite_read_file") {
           result = await handleNetsuiteReadFile(args);
         } else if (name === "netsuite_find_file") {
@@ -1946,12 +2332,34 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteFindFolder(args);
         } else if (name === "netsuite_list_folder") {
           result = await handleNetsuiteListFolder(args);
+        } else if (name === "netsuite_create_folder") {
+          result = await handleNetsuiteCreateFolder(args);
+        } else if (name === "netsuite_upload_file") {
+          result = await handleNetsuiteUploadFile(args);
+        } else if (name === "netsuite_update_file_content") {
+          result = await handleNetsuiteUpdateFileContent(args);
+        } else if (name === "netsuite_rename_file") {
+          result = await handleNetsuiteRenameFile(args);
+        } else if (name === "netsuite_rename_folder") {
+          result = await handleNetsuiteRenameFolder(args);
+        } else if (name === "netsuite_delete_file") {
+          result = await handleNetsuiteDeleteFile(args);
+        } else if (name === "netsuite_delete_folder") {
+          result = await handleNetsuiteDeleteFolder(args);
+        } else if (name === "netsuite_move_items") {
+          result = await handleNetsuiteMoveItems(args);
         } else if (name === "netsuite_get_scripts") {
           result = await handleNetsuiteGetScripts(args);
         } else if (name === "netsuite_get_script_files") {
           result = await handleNetsuiteGetScriptFiles(args);
         } else if (name === "netsuite_get_deployed_scripts") {
           result = await handleNetsuiteGetDeployedScripts(args);
+        } else if (name === "netsuite_create_script_record") {
+          result = await handleNetsuiteCreateScriptRecord(args);
+        } else if (name === "netsuite_create_script_deployment") {
+          result = await handleNetsuiteCreateScriptDeployment(args);
+        } else if (name === "netsuite_run_quick_script") {
+          result = await handleNetsuiteRunQuickScript(args);
         } else if (name === "netsuite_get_logs") {
           result = await handleNetsuiteGetLogs(args);
         } else if (name === "netsuite_suitelet_stream_start") {
@@ -1968,6 +2376,8 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleSuiteletFetchHtml(args);
         } else if (name === "netsuite_suitelet_proxy_request") {
           result = await handleSuiteletProxyRequest(args);
+        } else if (name === "netsuite_dump_cookies") {
+          result = await handleDumpNetsuiteCookies();
         } else if (name === "netsuite_suitelet_control_open") {
           result = await handleSuiteletControlOpen(args);
         } else if (name === "netsuite_suitelet_inspect") {
@@ -2625,6 +3035,20 @@ async function handleNetsuiteCreateCustomRecordField(args) {
   };
 }
 
+async function handleNetsuiteCreateScriptField(args) {
+  const result = await callNetsuiteRoute(
+    "CREATE_SCRIPT_FIELD",
+    args,
+    "Failed to create script field."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
 async function handleNetsuiteFindFile(args) {
   const { id, name } = args ?? {};
   if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
@@ -2819,6 +3243,266 @@ async function handleNetsuiteReadFile(args) {
   };
 }
 
+async function lookupFileCabinetFile(fileId) {
+  const idNum = parseInt(String(fileId ?? ""), 10);
+  if (isNaN(idNum)) throw new Error("fileId must be a numeric file ID.");
+
+  const result = await callNetsuiteRoute(
+    "RUN_SUITEQL_QUERY",
+    {
+      sql: `SELECT id, name, folder, filetype, filesize, url FROM file WHERE id = ${idNum} AND ROWNUM <= 1`,
+      limit: 1
+    },
+    `Failed to look up file ${fileId}.`
+  );
+  const rows = Array.isArray(result) ? result : (result?.results ?? []);
+  const file = rows[0];
+  if (!file) throw new Error(`File with ID ${fileId} not found.`);
+  return file;
+}
+
+async function lookupFileCabinetFolder(folderId) {
+  const idNum = parseInt(String(folderId ?? ""), 10);
+  if (isNaN(idNum)) throw new Error("folderId must be a numeric folder ID.");
+
+  const result = await callNetsuiteRoute(
+    "RUN_SUITEQL_QUERY",
+    {
+      sql: `SELECT id, name, parent FROM MediaItemFolder WHERE id = ${idNum} AND ROWNUM <= 1`,
+      limit: 1
+    },
+    `Failed to look up folder ${folderId}.`
+  );
+  const rows = Array.isArray(result) ? result : (result?.results ?? []);
+  const folder = rows[0];
+  if (!folder) throw new Error(`Folder with ID ${folderId} not found.`);
+  return folder;
+}
+
+function asMcpTextResult(result) {
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteCreateFolder(args) {
+  const name = String(args?.name ?? "").trim();
+  if (!name) throw new Error("name is required.");
+
+  const result = await callNetsuiteRoute(
+    "CREATE_FOLDER",
+    {
+      name,
+      parentFolder: args?.parentFolderId ?? -15
+    },
+    "Failed to create folder."
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteUploadFile(args) {
+  if (
+    (args?.localPath || args?.path || args?.localPaths || args?.files) &&
+    args?.fileContent === undefined &&
+    args?.fileContentBase64 === undefined
+  ) {
+    throw new Error(
+      "localPath uploads must be sent through the local MCP server. The Chrome extension cannot read local filesystem paths directly."
+    );
+  }
+
+  const fileName = String(args?.fileName ?? "").trim();
+  if (!fileName) throw new Error("fileName is required.");
+  if (args?.fileContent === undefined && args?.fileContentBase64 === undefined) {
+    throw new Error("Either fileContent or fileContentBase64 is required.");
+  }
+
+  const result = await callNetsuiteRoute(
+    "UPLOAD_FILE",
+    {
+      fileName,
+      fileContent: args.fileContent,
+      fileContentBase64: args.fileContentBase64,
+      mimeType: args.mimeType,
+      folderId: args.folderId ?? -15
+    },
+    "Failed to upload file."
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteUpdateFileContent(args) {
+  const fileId = parseInt(String(args?.fileId ?? ""), 10);
+  if (isNaN(fileId)) throw new Error("fileId must be a numeric file ID.");
+  if (args?.fileContent === undefined) throw new Error("fileContent is required.");
+
+  const file = (!args.fileName || !args.folderId || !args.mediaType)
+    ? await lookupFileCabinetFile(fileId)
+    : null;
+
+  const result = await callNetsuiteRoute(
+    "UPDATE_FILE_CONTENT",
+    {
+      fileId,
+      fileContent: args.fileContent,
+      fileName: args.fileName ?? file?.name ?? `file_${fileId}`,
+      folderId: args.folderId ?? file?.folder,
+      mediaType: args.mediaType ?? file?.filetype ?? "JAVASCRIPT"
+    },
+    `Failed to update file ${fileId}.`
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteRenameFile(args) {
+  const fileId = parseInt(String(args?.fileId ?? ""), 10);
+  if (isNaN(fileId)) throw new Error("fileId must be a numeric file ID.");
+  const newName = String(args?.newName ?? "").trim();
+  if (!newName) throw new Error("newName is required.");
+
+  const file = (!args.folderId || !args.filetype || !args.filesize)
+    ? await lookupFileCabinetFile(fileId)
+    : null;
+
+  const result = await callNetsuiteRoute(
+    "RENAME_FILE",
+    {
+      fileId,
+      newName,
+      folderId: args.folderId ?? file?.folder,
+      filetype: args.filetype ?? file?.filetype,
+      filesize: args.filesize ?? file?.filesize
+    },
+    `Failed to rename file ${fileId}.`
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteRenameFolder(args) {
+  const folderId = parseInt(String(args?.folderId ?? ""), 10);
+  if (isNaN(folderId)) throw new Error("folderId must be a numeric folder ID.");
+  const newName = String(args?.newName ?? "").trim();
+  if (!newName) throw new Error("newName is required.");
+
+  const folder = args.parentFolderId === undefined
+    ? await lookupFileCabinetFolder(folderId)
+    : null;
+
+  const result = await callNetsuiteRoute(
+    "RENAME_FOLDER",
+    {
+      folderId,
+      newName,
+      parentFolderId: args.parentFolderId ?? folder?.parent ?? -15
+    },
+    `Failed to rename folder ${folderId}.`
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteDeleteFile(args) {
+  const fileId = parseInt(String(args?.fileId ?? ""), 10);
+  if (isNaN(fileId)) throw new Error("fileId must be a numeric file ID.");
+  const file = args.folderId === undefined ? await lookupFileCabinetFile(fileId) : null;
+
+  const result = await callNetsuiteRoute(
+    "DELETE_FILE",
+    {
+      fileId,
+      folderId: args.folderId ?? file?.folder
+    },
+    `Failed to delete file ${fileId}.`
+  );
+  return asMcpTextResult({ fileId, result });
+}
+
+async function handleNetsuiteDeleteFolder(args) {
+  const folderId = parseInt(String(args?.folderId ?? ""), 10);
+  if (isNaN(folderId)) throw new Error("folderId must be a numeric folder ID.");
+
+  const result = await callNetsuiteRoute(
+    "DELETE_FOLDER",
+    { folderId },
+    `Failed to delete folder ${folderId}.`
+  );
+  return asMcpTextResult({ folderId, result: result ?? "success" });
+}
+
+async function handleNetsuiteMoveItems(args) {
+  const srcFolderId = parseInt(String(args?.srcFolderId ?? ""), 10);
+  const dstFolderId = parseInt(String(args?.dstFolderId ?? ""), 10);
+  if (isNaN(srcFolderId)) throw new Error("srcFolderId must be numeric.");
+  if (isNaN(dstFolderId)) throw new Error("dstFolderId must be numeric.");
+
+  const result = await callNetsuiteRoute(
+    "MOVE_ITEMS",
+    {
+      srcFolderId,
+      dstFolderId,
+      fileIds: Array.isArray(args?.fileIds) ? args.fileIds : [],
+      folderIds: Array.isArray(args?.folderIds) ? args.folderIds : []
+    },
+    "Failed to move File Cabinet items."
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteCreateScriptRecord(args) {
+  const name = String(args?.name ?? "").trim();
+  const scriptId = String(args?.scriptId ?? "").trim();
+  const fileId = parseInt(String(args?.fileId ?? ""), 10);
+  if (!name) throw new Error("name is required.");
+  if (!scriptId) throw new Error("scriptId is required.");
+  if (isNaN(fileId)) throw new Error("fileId must be a numeric file ID.");
+
+  const result = await callNetsuiteRoute(
+    "CREATE_SCRIPT",
+    {
+      name,
+      scriptId,
+      fileId,
+      scriptType: args?.scriptType ?? "SCRIPTLET",
+      description: args?.description ?? "",
+      apiVersion: args?.apiVersion ?? "2.1"
+    },
+    "Failed to create script record."
+  );
+  return asMcpTextResult(result);
+}
+
+async function handleNetsuiteCreateScriptDeployment(args) {
+  const scriptInternalId = parseInt(String(args?.scriptInternalId ?? ""), 10);
+  const deploymentScriptId = String(
+    args?.deploymentScriptId ?? args?.scriptId ?? ""
+  ).trim();
+  const title = String(args?.title ?? args?.name ?? "").trim();
+
+  if (isNaN(scriptInternalId)) {
+    throw new Error("scriptInternalId must be a numeric script record ID.");
+  }
+  if (!deploymentScriptId) {
+    throw new Error("deploymentScriptId is required.");
+  }
+
+  const result = await callNetsuiteRoute(
+    "CREATE_SCRIPT_DEPLOYMENT",
+    {
+      scriptInternalId,
+      deploymentScriptId,
+      name: args?.name ?? title,
+      title: title || undefined,
+      status: args?.status ?? "RELEASED",
+      logLevel: args?.logLevel ?? "DEBUG",
+      runAsRole: args?.runAsRole
+    },
+    "Failed to create script deployment."
+  );
+  return asMcpTextResult(result);
+}
+
 // -----------------------------
 // Script Tool Helpers (MCP bridge)
 // -----------------------------
@@ -2870,6 +3554,27 @@ async function handleNetsuiteGetScriptFiles(args) {
   if (!response || response.status === "error") {
     const rawMsg = response?.message;
     throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : "Failed to fetch script files");
+  }
+
+  return { content: [{ type: "text", text: JSON.stringify(response.message, null, 2) }] };
+}
+
+async function handleNetsuiteRunQuickScript(args) {
+  const code = String(args?.code ?? "").trim();
+  if (!code) throw new Error("code is required.");
+
+  const tab = await getPreferredNetsuiteTab();
+  if (!tab) throw new Error("No suitable NetSuite tab found. Make sure a NetSuite page is open.");
+
+  const response = await sendMessageToTab(tab.id, {
+    action: "RUN_QUICK_SCRIPT",
+    data: { code, mode: "normal" },
+    mode: "normal"
+  });
+
+  if (!response || response.status === "error") {
+    const rawMsg = response?.message;
+    throw new Error(rawMsg ? (typeof rawMsg === "string" ? rawMsg : JSON.stringify(rawMsg)) : "Failed to run quick script");
   }
 
   return { content: [{ type: "text", text: JSON.stringify(response.message, null, 2) }] };
@@ -3044,6 +3749,57 @@ async function sendSuiteletDebuggerCommand(tabId, method, params) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
 
+// Read the live NetSuite session cookies (incl. HttpOnly auth cookies) so
+// Playwright can reuse the real browser session instead of logging in again.
+// Uses chrome.cookies (needs the "cookies" permission) — NOT the debugger — so
+// it does not flash the "… is in debug mode" banner and needs no open tab.
+const SAME_SITE_MAP = { no_restriction: "None", lax: "Lax", strict: "Strict" };
+
+async function handleDumpNetsuiteCookies() {
+  // Pick the account the SAME way the MCP bridge does: getPreferredNetsuiteTab()
+  // honors the mcpPreferredAccount setting (falls back to the active NS tab).
+  // Then dump ONLY that account's cookies via getAll({url}), which returns the
+  // cookies that would be sent to that origin (its host cookies + shared
+  // .netsuite.com) and EXCLUDES other logged-in accounts' host cookies.
+  let origin = "";
+  try {
+    const tab = await getPreferredNetsuiteTab();
+    if (tab?.url) origin = getTabOrigin(tab.url);
+  } catch { /* fall back below */ }
+
+  const raw = origin
+    ? await chrome.cookies.getAll({ url: `${origin}/` })
+    : await chrome.cookies.getAll({ domain: "netsuite.com" });
+
+  const cookies = (raw || []).map((c) => {
+    const out = {
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || "/",
+      httpOnly: Boolean(c.httpOnly),
+      secure: Boolean(c.secure)
+    };
+    if (!c.session && typeof c.expirationDate === "number") {
+      out.expires = Math.floor(c.expirationDate);
+    }
+    const sameSite = SAME_SITE_MAP[c.sameSite];
+    if (sameSite) out.sameSite = sameSite;
+    return out;
+  });
+
+  if (!cookies.length) {
+    throw new Error("No NetSuite cookies found. Log into NetSuite in your browser first.");
+  }
+
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({ ok: true, origin, count: cookies.length, cookies }, null, 2)
+    }]
+  };
+}
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (suiteletStreamSession?.tabId === tabId) {
     suiteletStreamSession = null;
@@ -3139,6 +3895,7 @@ async function querySuitelets(query) {
         script.id AS scriptinternalid,
         script.scriptid AS scriptscriptid,
         script.name AS scriptname,
+        scriptdeployment.primarykey AS deploymentrecordid,
         scriptdeployment.deploymentid,
         scriptdeployment.scriptid AS deploymentscriptid,
         scriptdeployment.status,
@@ -3167,6 +3924,7 @@ async function querySuitelets(query) {
     .map((row) => {
       const scriptId = String(row.scriptinternalid || row.scriptInternalId || row.id || "");
       const deployId = String(row.deploymentid || row.deploymentId || "").trim();
+      const deploymentRecordId = String(row.deploymentrecordid || row.deploymentRecordId || row.primarykey || "").trim();
       const scriptName = String(row.scriptname || row.scriptName || "Suitelet");
       const deploymentScriptId = String(row.deploymentscriptid || row.deploymentScriptId || "");
       const scriptScriptId = String(row.scriptscriptid || row.scriptScriptId || row.scriptid || "");
@@ -3175,6 +3933,7 @@ async function querySuitelets(query) {
         scriptId: scriptScriptId,
         scriptName,
         deploymentId: deployId,
+        deploymentRecordId,
         deploymentScriptId,
         status: String(row.status || ""),
         url: origin && scriptId && deployId
@@ -4157,6 +4916,7 @@ const SUITELET_INSPECT_EXPRESSION = `(function () {
   function selectorFor(el) {
     if (el.id) return "#" + CSS.escape(el.id);
     if (el.getAttribute("name")) return el.tagName.toLowerCase() + "[name=\\"" + el.getAttribute("name") + "\\"]";
+    if (el.getAttribute("data-input-id")) return el.tagName.toLowerCase() + "[data-input-id=\\"" + el.getAttribute("data-input-id") + "\\"]";
     var path = [];
     var node = el;
     while (node && node.nodeType === 1 && path.length < 5) {
@@ -4173,19 +4933,21 @@ const SUITELET_INSPECT_EXPRESSION = `(function () {
     return path.join(" > ");
   }
   var nodes = Array.prototype.slice.call(
-    document.querySelectorAll("input, textarea, select, button, a[href], [role=button], [onclick]")
+    document.querySelectorAll("input, textarea, select, button, a[href], [role=button], [onclick], .ddarrowSpan, .uir-field-dropdown-arrow, [data-input-id], .uir-field-wrapper[data-nsps-label]")
   );
   var out = [];
   for (var i = 0; i < nodes.length && out.length < 120; i++) {
     var el = nodes[i];
     if (!visible(el)) continue;
+    var labelledBy = el.getAttribute("aria-labelledby") ? document.getElementById(el.getAttribute("aria-labelledby")) : null;
+    var fieldWrapper = el.closest ? el.closest(".uir-field-wrapper[data-nsps-label]") : null;
     out.push({
       tag: el.tagName.toLowerCase(),
       type: el.getAttribute("type") || "",
       id: el.id || "",
       name: el.getAttribute("name") || "",
       selector: selectorFor(el),
-      label: (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().slice(0, 100)
+      label: (el.innerText || el.value || el.placeholder || el.getAttribute("aria-label") || (labelledBy && labelledBy.innerText) || el.getAttribute("title") || el.getAttribute("data-nsps-label") || (fieldWrapper && fieldWrapper.getAttribute("data-nsps-label")) || "").trim().slice(0, 100)
     });
   }
   return { title: document.title, url: location.href, count: out.length, elements: out };
@@ -4420,13 +5182,86 @@ async function handleSuiteletFill(args) {
   const expression = `(function () {
     var el = document.querySelector(${JSON.stringify(selector)});
     if (!el) return { ok: false, error: "Element not found: " + ${JSON.stringify(selector)} };
-    el.focus();
     var value = ${JSON.stringify(value)};
+
+    function findNetsuiteDropdownParts(node) {
+      var input = null;
+      if (node && node.matches && node.matches("input.dropdownInput, input.nldropdown")) input = node;
+      if (!input && node && node.getAttribute && node.getAttribute("data-input-id")) {
+        input = document.getElementById(node.getAttribute("data-input-id"));
+      }
+      if (!input && node && node.closest) {
+        var wrapper = node.closest(".uir-field-wrapper[data-nsps-label], .uir-select-input-container, .uir-field-input.nldropdown, span[data-fieldtype='select']");
+        if (wrapper) input = wrapper.querySelector("input.dropdownInput, input.nldropdown");
+      }
+      if (!input) return null;
+
+      var fieldName = "";
+      if (input.name && input.name.indexOf("inpt_") === 0) fieldName = input.name.slice(5);
+      if (!fieldName) {
+        var fieldWrapper = input.closest && input.closest(".uir-field-wrapper[data-field-name]");
+        fieldName = fieldWrapper ? fieldWrapper.getAttribute("data-field-name") : "";
+      }
+      if (!fieldName) return null;
+
+      var dropdown = document.querySelector(".ns-dropdown[data-name='" + CSS.escape(fieldName) + "']");
+      var hidden = document.querySelector("input[type='hidden'][name='" + CSS.escape(fieldName) + "']");
+      var index = hidden && hidden.id ? document.getElementById(hidden.id.replace(/^hddn_/, "indx_")) : null;
+      return { input: input, fieldName: fieldName, dropdown: dropdown, hidden: hidden, index: index };
+    }
+
+    function setNativeValue(node, nextValue) {
+      try {
+        var proto = node.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        var descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+        if (descriptor && descriptor.set) descriptor.set.call(node, nextValue);
+        else node.value = nextValue;
+      } catch (e) { node.value = nextValue; }
+    }
+
+    var dropdownParts = findNetsuiteDropdownParts(el);
+    if (dropdownParts && dropdownParts.dropdown && dropdownParts.hidden) {
+      var options = [];
+      try { options = JSON.parse(dropdownParts.dropdown.getAttribute("data-options") || "[]"); } catch (e) {}
+      var needle = value.trim().toLowerCase();
+      var option = options.filter(function (opt) {
+        return String(opt.value) === value || String(opt.text).trim().toLowerCase() === needle;
+      })[0] || options.filter(function (opt) {
+        return String(opt.text).trim().toLowerCase().indexOf(needle) !== -1;
+      })[0];
+      if (!option) {
+        return {
+          ok: false,
+          error: "No NetSuite dropdown option matched: " + value,
+          selector: ${JSON.stringify(selector)},
+          fieldName: dropdownParts.fieldName,
+          options: options.slice(0, 20)
+        };
+      }
+
+      setNativeValue(dropdownParts.input, String(option.text || " "));
+      setNativeValue(dropdownParts.hidden, String(option.value || ""));
+      if (dropdownParts.index) {
+        var idx = options.indexOf(option);
+        setNativeValue(dropdownParts.index, idx >= 0 ? String(idx) : "");
+      }
+      dropdownParts.input.dispatchEvent(new Event("input", { bubbles: true }));
+      dropdownParts.input.dispatchEvent(new Event("change", { bubbles: true }));
+      dropdownParts.hidden.dispatchEvent(new Event("input", { bubbles: true }));
+      dropdownParts.hidden.dispatchEvent(new Event("change", { bubbles: true }));
+      return {
+        ok: true,
+        selector: ${JSON.stringify(selector)},
+        fieldName: dropdownParts.fieldName,
+        value: String(option.value || ""),
+        text: String(option.text || ""),
+        mode: "netsuite-dropdown"
+      };
+    }
+
+    el.focus();
     try {
-      var proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      var descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-      if (descriptor && descriptor.set) descriptor.set.call(el, value);
-      else el.value = value;
+      setNativeValue(el, value);
     } catch (e) { el.value = value; }
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -4441,27 +5276,276 @@ async function handleSuiteletClick(args) {
   const text = String(args?.text || "").trim();
   if (!selector && !text) throw new Error("Provide a selector or visible text to click.");
   await focusSuiteletControlTab();
+  const tabId = requireSuiteletControlTab();
+  await ensureSuiteletDebugger(tabId);
   const expression = `(function () {
+    function isVisible(node) {
+      if (!node) return false;
+      var r = node.getBoundingClientRect();
+      var s = window.getComputedStyle(node);
+      return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+    }
+
+    function bestNetsuiteDropdownClickTarget(node) {
+      var input = null;
+      if (node && node.matches && node.matches("input.dropdownInput, input.nldropdown")) input = node;
+      if (!input && node && node.closest) {
+        var wrapper = node.closest(".uir-field-wrapper[data-nsps-label], .uir-select-input-container, .uir-field-input.nldropdown, span[data-fieldtype='select']");
+        if (wrapper) input = wrapper.querySelector("input.dropdownInput, input.nldropdown");
+      }
+      if (!input) return node;
+
+      var arrow = null;
+      if (input.id) {
+        arrow = document.querySelector(".ddarrowSpan[data-input-id='" + CSS.escape(input.id) + "'], .uir-field-dropdown-arrow[data-input-id='" + CSS.escape(input.id) + "']");
+      }
+      if (!arrow) {
+        var container = input.closest(".uir-select-input-container, .uir-field-input.nldropdown, span[data-fieldtype='select']");
+        arrow = container && container.querySelector(".ddarrowSpan, .uir-field-dropdown-arrow");
+      }
+      return arrow || input;
+    }
+
+    function findNetsuiteDropdownInput(node) {
+      if (!node) return null;
+      if (node.matches && node.matches("input.dropdownInput, input.nldropdown")) return node;
+      if (node.getAttribute && node.getAttribute("data-input-id")) {
+        var byId = document.getElementById(node.getAttribute("data-input-id"));
+        if (byId) return byId;
+      }
+      if (node.closest) {
+        var wrapper = node.closest(".uir-field-wrapper[data-nsps-label], .uir-select-input-container, .uir-field-input.nldropdown, span[data-fieldtype='select']");
+        if (wrapper) return wrapper.querySelector("input.dropdownInput, input.nldropdown");
+      }
+      return null;
+    }
+
+    function dropdownVisibleForInput(input) {
+      if (!input) return false;
+      var name = input.name || "";
+      if (name.indexOf("inpt_") === 0) name = name.slice(5);
+      var wrappers = Array.prototype.slice.call(document.querySelectorAll(".ns-dropdown"));
+      return wrappers.some(function (node) {
+        if (name && node.getAttribute("data-name") !== name) return false;
+        var r = node.getBoundingClientRect();
+        var s = getComputedStyle(node);
+        return r.width > 0 && r.height > 0 && s.display !== "none" && s.visibility !== "hidden";
+      });
+    }
+
+    function makeDropdownEvent(type, input) {
+      return {
+        type: type,
+        target: input,
+        currentTarget: input,
+        srcElement: input,
+        key: "ArrowDown",
+        code: "ArrowDown",
+        keyCode: 40,
+        which: 40,
+        altKey: true,
+        bubbles: true,
+        cancelable: true,
+        preventDefault: function () {},
+        stopPropagation: function () {},
+        stopImmediatePropagation: function () {}
+      };
+    }
+
+    function openNetsuiteDropdown(input) {
+      var attempts = [];
+      if (!input) return { attempted: false, open: false, attempts: attempts };
+      try { input.focus(); attempts.push("input.focus"); } catch (e) { attempts.push("input.focus:" + e.message); }
+
+      var controller = null;
+      try {
+        if (typeof window.getDropdown === "function") {
+          controller = window.getDropdown(input);
+          attempts.push("getDropdown");
+        }
+      } catch (e) { attempts.push("getDropdown:" + e.message); }
+
+      if (controller) {
+        [
+          ["handleOnFocus", makeDropdownEvent("focus", input)],
+          ["handleKeydown", makeDropdownEvent("keydown", input)],
+          ["handleKeypress", makeDropdownEvent("keypress", input)]
+        ].forEach(function (entry) {
+          try {
+            if (typeof controller[entry[0]] === "function") {
+              controller[entry[0]](entry[1]);
+              attempts.push(entry[0]);
+            }
+          } catch (e) { attempts.push(entry[0] + ":" + e.message); }
+        });
+
+        var methodNames = [];
+        try {
+          methodNames = Object.keys(controller);
+          var proto = Object.getPrototypeOf(controller);
+          if (proto) methodNames = methodNames.concat(Object.getOwnPropertyNames(proto));
+        } catch (e) {}
+        methodNames = methodNames.filter(function (name, idx, arr) {
+          return arr.indexOf(name) === idx && /^(open|show|expand|toggle|display)|dropdown|popup/i.test(name) && typeof controller[name] === "function";
+        });
+        methodNames.slice(0, 12).forEach(function (name) {
+          if (dropdownVisibleForInput(input)) return;
+          try {
+            controller[name]();
+            attempts.push(name);
+          } catch (e) { attempts.push(name + ":" + e.message); }
+        });
+      }
+
+      if (!dropdownVisibleForInput(input)) {
+        ["keydown", "keyup"].forEach(function (type) {
+          try {
+            input.dispatchEvent(new KeyboardEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              key: "ArrowDown",
+              code: "ArrowDown",
+              keyCode: 40,
+              which: 40,
+              altKey: true
+            }));
+            attempts.push(type + ":AltArrowDown");
+          } catch (e) { attempts.push(type + ":" + e.message); }
+        });
+      }
+
+      return { attempted: true, open: dropdownVisibleForInput(input), attempts: attempts };
+    }
+
+    function dispatchJsClick(node, x, y) {
+      ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(function (type) {
+        try {
+          var EventCtor = type.indexOf("pointer") === 0 && typeof PointerEvent !== "undefined" ? PointerEvent : MouseEvent;
+          node.dispatchEvent(new EventCtor(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            clientX: x,
+            clientY: y,
+            button: 0,
+            buttons: type === "pointerdown" || type === "mousedown" ? 1 : 0,
+            pointerId: 1,
+            pointerType: "mouse",
+            isPrimary: true
+          }));
+        } catch (e) {
+          try {
+            node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 }));
+          } catch (ignored) {}
+        }
+      });
+    }
+
+    function fireNetsuiteArrowClick(input, arrow) {
+      if (!input || !arrow) return false;
+      try { input.focus(); } catch (e) {}
+      ["mouseover", "mousedown", "mouseup", "click"].forEach(function (type) {
+        try {
+          arrow.dispatchEvent(new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            button: 0
+          }));
+        } catch (e) {}
+      });
+      return true;
+    }
+
     var el = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : "null"};
     if (!el && ${JSON.stringify(text)}) {
       var needle = ${JSON.stringify(text.toLowerCase())};
       var cands = Array.prototype.slice.call(
-        document.querySelectorAll("button, a, input[type=button], input[type=submit], [role=button], .uir-button, span.bntxt, td.bntxt")
+        document.querySelectorAll("button, a, input[type=button], input[type=submit], [role=button], .uir-button, span.bntxt, td.bntxt, .ddarrowSpan, .uir-field-dropdown-arrow, input.dropdownInput, .uir-label-span, .uir-field-wrapper[data-nsps-label]")
       );
       el = cands.filter(function (c) {
-        var label = (c.innerText || c.value || c.getAttribute("title") || "").trim().toLowerCase();
+        var labelledBy = c.getAttribute("aria-labelledby") ? document.getElementById(c.getAttribute("aria-labelledby")) : null;
+        var wrapper = c.closest ? c.closest(".uir-field-wrapper[data-nsps-label]") : null;
+        var label = (c.innerText || c.value || c.getAttribute("title") || c.getAttribute("data-nsps-label") || (labelledBy && labelledBy.innerText) || (wrapper && wrapper.getAttribute("data-nsps-label")) || "").trim().toLowerCase();
         return label === needle;
       })[0] || cands.filter(function (c) {
-        var label = (c.innerText || c.value || c.getAttribute("title") || "").trim().toLowerCase();
+        var labelledBy = c.getAttribute("aria-labelledby") ? document.getElementById(c.getAttribute("aria-labelledby")) : null;
+        var wrapper = c.closest ? c.closest(".uir-field-wrapper[data-nsps-label]") : null;
+        var label = (c.innerText || c.value || c.getAttribute("title") || c.getAttribute("data-nsps-label") || (labelledBy && labelledBy.innerText) || (wrapper && wrapper.getAttribute("data-nsps-label")) || "").trim().toLowerCase();
         return label.indexOf(needle) !== -1;
       })[0];
     }
     if (!el) return { ok: false, error: "Clickable element not found." };
-    if (el.scrollIntoView) el.scrollIntoView({ block: "center" });
-    el.click();
-    return { ok: true, clicked: (el.innerText || el.value || el.id || el.tagName || "").toString().trim().slice(0, 100) };
+    var dropdownInput = findNetsuiteDropdownInput(el);
+    el = bestNetsuiteDropdownClickTarget(el);
+    if (el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "center" });
+    var r = el.getBoundingClientRect();
+    var x = r.left + r.width / 2;
+    var y = r.top + r.height / 2;
+    if (!isVisible(el)) return { ok: false, error: "Clickable element is not visible." };
+    try { el.focus && el.focus(); } catch (e) {}
+    var usedNetsuiteArrowSequence = dropdownInput ? fireNetsuiteArrowClick(dropdownInput, el) : false;
+    dispatchJsClick(el, x, y);
+    var dropdownOpen = openNetsuiteDropdown(dropdownInput);
+    return {
+      ok: true,
+      clicked: (el.innerText || el.value || el.id || el.getAttribute("title") || el.tagName || "").toString().trim().slice(0, 100),
+      x: x,
+      y: y,
+      tag: el.tagName,
+      id: el.id || "",
+      className: String(el.className || ""),
+      usedNetsuiteArrowSequence: usedNetsuiteArrowSequence,
+      netsuiteDropdown: dropdownOpen
+    };
   })()`;
   const value = await evalInSuiteletTab(expression);
+  if (value?.ok && Number.isFinite(Number(value.x)) && Number.isFinite(Number(value.y))) {
+    try {
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: Number(value.x),
+        y: Number(value.y),
+        buttons: 0
+      });
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: Number(value.x),
+        y: Number(value.y),
+        button: "left",
+        buttons: 1,
+        clickCount: 1
+      });
+      await sendSuiteletDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: Number(value.x),
+        y: Number(value.y),
+        button: "left",
+        buttons: 0,
+        clickCount: 1
+      });
+      if (value.netsuiteDropdown?.attempted && !value.netsuiteDropdown?.open) {
+        await sendSuiteletDebuggerCommand(tabId, "Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: "ArrowDown",
+          code: "ArrowDown",
+          windowsVirtualKeyCode: 40,
+          nativeVirtualKeyCode: 40,
+          modifiers: 1
+        });
+        await sendSuiteletDebuggerCommand(tabId, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: "ArrowDown",
+          code: "ArrowDown",
+          windowsVirtualKeyCode: 40,
+          nativeVirtualKeyCode: 40,
+          modifiers: 1
+        });
+      }
+    } catch (e) {
+      value.nativeClickError = String(e?.message || e);
+    }
+  }
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
