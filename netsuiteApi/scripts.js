@@ -408,6 +408,101 @@ const getLogLevelLabel = (logLevel) => {
   return labels[normalized] || normalized;
 };
 
+const normalizeDeploymentScriptType = (scriptType) => {
+  const normalized = String(scriptType || "SCRIPTLET")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (normalized === "SUITELET") return "SCRIPTLET";
+  if (normalized === "SCHEDULED_SCRIPT") return "SCHEDULED";
+  if (normalized === "MAP_REDUCE" || normalized === "MAPREDUCESCRIPT") {
+    return "MAPREDUCE";
+  }
+  if (normalized === "RESTLET") return "RESTLET";
+  return normalized || "SCRIPTLET";
+};
+
+const addAudienceAllInternalRoles = (body) => {
+  body.set("audience", "");
+  body.set("audslctrole", "");
+  body.set("allroles", "T");
+  body.set("audslctextrole", "");
+  body.set("auddepartment", "");
+  body.set("audsubsidiary", "");
+  body.set("audgroup", "");
+  body.set("audemployee", "");
+  body.set("allemployees", "F");
+  body.set("audpartner", "");
+  body.set("allpartners", "F");
+};
+
+const addScriptDeploymentScheduleFields = (body, dateParts, options = {}) => {
+  const startDate = options.startDate || dateParts.endByDate;
+  const startTime = options.startTime || dateParts.startTime;
+  const recurringEvent =
+    options.recurringEvent ||
+    JSON.stringify({
+      eventType: "SingleEvent",
+      startDate: `${pad2(dateParts.month)}/${pad2(dateParts.day)}/${dateParts.year}`,
+      startTime
+    });
+
+  body.set("processorpool", options.processorPool || "script");
+  if (options.queueId !== false) {
+    body.set("queueid", options.queueId ?? "");
+  }
+  body.set("processormodelversion", String(options.processorModelVersion ?? 2));
+  body.set("frequency", options.frequency || "NONE");
+  body.set("period", String(options.period ?? 0));
+  body.set("recurrencedowmask", options.recurrenceDowMask || "");
+  body.set("recurrencedow", String(options.recurrenceDow ?? 0));
+  body.set("recurrencedowim", String(options.recurrenceDowIm ?? 0));
+  body.set("_frequency", options.frequency || "NONE");
+  body.set("_day_mode", options.dayMode || "EVERY");
+  body.set("_day_period", String(options.dayPeriod ?? 1));
+  body.set("_week_period", String(options.weekPeriod ?? 1));
+  body.set("_month_mode", options.monthMode || "DOM");
+  body.set("_month_dom", String(options.monthDay ?? dateParts.day));
+  body.set("_month_dom_period", String(options.monthPeriod ?? 1));
+  body.set("_year_mode", options.yearMode || "DOM");
+  body.set("_year_month", String(options.yearMonth ?? dateParts.month));
+  body.set("_year_dom", String(options.yearDay ?? dateParts.day));
+  body.set("_week_dow_2", "F");
+  body.set("_week_dow_3", "T");
+  body.set("_week_dow_4", "F");
+  body.set("_week_dow_5", "F");
+  body.set("_week_dow_6", "F");
+  body.set("_week_dow_7", "F");
+  body.set("_week_dow_1", "F");
+  body.set("_month_dowim", String(options.monthDowIm ?? 4));
+  body.set("_month_dow", String(options.monthDow ?? 3));
+  body.set("_month_dowim_period", String(options.monthDowImPeriod ?? 1));
+  body.set("_year_dowim", String(options.yearDowIm ?? 4));
+  body.set("_year_dow", String(options.yearDow ?? 3));
+  body.set("_year_dowim_month", String(options.yearDowImMonth ?? dateParts.month));
+  body.set("startdate", startDate);
+  body.set("starttime", startTime);
+  body.set("recurrenceminutes", options.recurrenceMinutes || "");
+  body.set("endbydate", options.endByDate || "");
+  body.set("noenddate", options.noEndDate === false ? "F" : "T");
+  body.set("recurringevent", recurringEvent);
+};
+
+const addMapReduceDeploymentFields = (body, options = {}) => {
+  const concurrencyLimit = options.concurrencyLimit ?? 1;
+  const yieldAfterMins = options.yieldAfterMins ?? 60;
+  const bufferSize = options.bufferSize ?? 1;
+
+  body.set("inpt_concurrencylimit", String(concurrencyLimit));
+  body.set("concurrencylimit", String(concurrencyLimit));
+  body.set("queueallstagesatonce", options.queueAllStagesAtOnce === false ? "F" : "T");
+  body.set("yieldaftermins_formattedValue", String(yieldAfterMins));
+  body.set("yieldaftermins", String(yieldAfterMins));
+  body.set("inpt_buffersize", String(bufferSize));
+  body.set("buffersize", String(bufferSize));
+};
+
 const pad2 = (value) => String(value).padStart(2, "0");
 
 const getNetSuiteDateParts = () => {
@@ -923,10 +1018,20 @@ window.createScriptDeployRecord = async (
     scriptId,
     deploymentScriptId,
     scriptInternalId,
+    scriptType = "SCRIPTLET",
     title,
-    status = "RELEASED",
+    status,
     logLevel = "DEBUG",
-    runAsRole
+    runAsRole,
+    priority = 2,
+    concurrencyLimit,
+    queueAllStagesAtOnce,
+    yieldAfterMins,
+    bufferSize,
+    startDate,
+    startTime,
+    recurringEvent,
+    deploymentFields
   }
 ) => {
   const { csrfToken, accountId } = getNetsiteParams();
@@ -935,8 +1040,13 @@ window.createScriptDeployRecord = async (
   const domain = url?.resolveDomain
     ? url.resolveDomain({ hostType: url.HostType.APPLICATION })
     : window.location.hostname;
-  const normalizedStatus = String(status || "RELEASED").toUpperCase();
   const normalizedLogLevel = String(logLevel || "DEBUG").toUpperCase();
+  const normalizedScriptType = normalizeDeploymentScriptType(scriptType);
+  const isScheduledLike =
+    normalizedScriptType === "SCHEDULED" || normalizedScriptType === "MAPREDUCE";
+  const resolvedStatus = String(
+    status || (isScheduledLike ? "NOTSCHEDULED" : normalizedScriptType === "RESTLET" ? "TESTING" : "RELEASED")
+  ).toUpperCase();
   const normalizedDeploymentScriptId = normalizeDeploymentScriptId(
     deploymentScriptId ?? scriptId
   );
@@ -960,14 +1070,10 @@ window.createScriptDeployRecord = async (
     scriptid: normalizedDeploymentScriptId,
     "nsutils-automated-ids": "on",
     isdeployed: "T",
-    inpt_status: getStatusLabel(normalizedStatus),
-    status: normalizedStatus,
-    inpt_eventtype: " ",
-    eventtype: "",
+    inpt_status: getStatusLabel(resolvedStatus),
+    status: resolvedStatus,
     inpt_loglevel: getLogLevelLabel(normalizedLogLevel),
     loglevel: normalizedLogLevel,
-    inpt_runasrole: "Administrator",
-    runasrole: runAsRole ?? role,
     _eml_nkey_: `${accountId}~${id}~${role}~N`,
     _multibtnstate_: "",
     selectedtab: "",
@@ -1016,26 +1122,76 @@ window.createScriptDeployRecord = async (
     submitted: "T",
     formdisplayview: "NONE",
     _button: "",
-    linksfields:
-      "linkcenter\x01linksection_display\x01linksection\x01linkcategory_display\x01linkcategory\x01linklabel\x01linklabel_term_ref\x01linklabel_translations\x01linklabel_en\x01linklabel_fr_fr\x01linklabel_de_de\x01linklabel_it_it\x01linkinsertbefore_display\x01linkinsertbefore\x01linkseqnum",
-    linksflags:
-      "1\x018\x011\x018\x011\x011\x010\x010\x010\x010\x010\x010\x018\x010\x010",
-    linksfieldsets:
-      "\x01\x01\x01\x01\x01\x01\x01\x01linklabel_translations\x01linklabel_translations\x01linklabel_translations\x01linklabel_translations\x01\x01\x01",
-    linkstypes:
-      "select\x01text\x01slaveselect\x01text\x01slaveselect\x01text\x01text\x01fieldset\x01text\x01text\x01text\x01text\x01text\x01slaveselect\x01integer",
-    linksorigtypes: "\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01",
-    linksparents:
-      "\x01links.linkcenter\x01links.linkcenter\x01links.linksection\x01links.linksection\x01\x01\x01\x01\x01\x01\x01\x01links.linkcategory\x01links.linkcategory\x01",
-    linkslabels:
-      "Centre\x01Section\x01\x01Category\x01\x01Label\x01\x01Translation\x01English+(International)\x01French+(France)\x01German\x01Italian\x01Insert+Before\x01\x01",
-    linksdata: "",
-    nextlinksidx: "1",
-    linksvalid: "T",
-    linksloaded: "F",
     scriptnoteloaded: "T",
     scriptnotedotted: "T"
   });
+
+  if (normalizedScriptType === "SCRIPTLET") {
+    body.set("inpt_eventtype", " ");
+    body.set("eventtype", "");
+    body.set("inpt_runasrole", "Administrator");
+    body.set("runasrole", runAsRole ?? role);
+    addAudienceAllInternalRoles(body);
+    body.set(
+      "linksfields",
+      "linkcenter\x01linksection_display\x01linksection\x01linkcategory_display\x01linkcategory\x01linklabel\x01linklabel_term_ref\x01linklabel_translations\x01linklabel_en\x01linklabel_fr_fr\x01linklabel_de_de\x01linklabel_it_it\x01linkinsertbefore_display\x01linkinsertbefore\x01linkseqnum"
+    );
+    body.set(
+      "linksflags",
+      "1\x018\x011\x018\x011\x011\x010\x010\x010\x010\x010\x010\x018\x010\x010"
+    );
+    body.set(
+      "linksfieldsets",
+      "\x01\x01\x01\x01\x01\x01\x01\x01linklabel_translations\x01linklabel_translations\x01linklabel_translations\x01linklabel_translations\x01\x01\x01"
+    );
+    body.set(
+      "linkstypes",
+      "select\x01text\x01slaveselect\x01text\x01slaveselect\x01text\x01text\x01fieldset\x01text\x01text\x01text\x01text\x01text\x01slaveselect\x01integer"
+    );
+    body.set("linksorigtypes", "\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01");
+    body.set(
+      "linksparents",
+      "\x01links.linkcenter\x01links.linkcenter\x01links.linksection\x01links.linksection\x01\x01\x01\x01\x01\x01\x01\x01links.linkcategory\x01links.linkcategory\x01"
+    );
+    body.set(
+      "linkslabels",
+      "Centre\x01Section\x01\x01Category\x01\x01Label\x01\x01Translation\x01English+(International)\x01French+(France)\x01German\x01Italian\x01Insert+Before\x01\x01"
+    );
+    body.set("linksdata", "");
+    body.set("nextlinksidx", "1");
+    body.set("linksvalid", "T");
+    body.set("linksloaded", "F");
+  } else if (normalizedScriptType === "RESTLET") {
+    addAudienceAllInternalRoles(body);
+  } else if (isScheduledLike) {
+    const dateParts = getNetSuiteDateParts();
+    body.set("inpt_priority", "Standard");
+    body.set("priority", String(priority ?? 2));
+    body.set("instancestatuspage", "");
+    addAudienceAllInternalRoles(body);
+    addScriptDeploymentScheduleFields(body, dateParts, {
+      startDate,
+      startTime,
+      recurringEvent,
+      queueId: normalizedScriptType === "SCHEDULED" ? "" : false
+    });
+    if (normalizedScriptType === "MAPREDUCE") {
+      addMapReduceDeploymentFields(body, {
+        concurrencyLimit,
+        queueAllStagesAtOnce,
+        yieldAfterMins,
+        bufferSize
+      });
+    }
+  }
+
+  if (deploymentFields && typeof deploymentFields === "object") {
+    Object.entries(deploymentFields).forEach(([fieldId, value]) => {
+      if (value !== undefined && value !== null) {
+        body.set(fieldId, String(value));
+      }
+    });
+  }
 
   const response = await fetch(
     `https://${domain}/app/common/scripting/scriptrecord.nl`,
@@ -1097,7 +1253,9 @@ window.createScriptDeployRecord = async (
     status: response.status,
     transport: "scriptrecord.nl",
     scriptInternalId: scriptRecordId,
+    scriptType: normalizedScriptType,
     deploymentScriptId: normalizedDeploymentScriptId,
+    deploymentStatus: resolvedStatus,
     deploymentRecordId,
     deploymentId,
     deployUrl,

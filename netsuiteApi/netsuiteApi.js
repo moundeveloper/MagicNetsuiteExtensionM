@@ -690,6 +690,17 @@ const extractScriptFieldIdFromHtml = (html) => {
   return null;
 };
 
+const extractCustomListIdFromHtml = (html) => {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const idInput = doc.querySelector('input[name="id"]');
+  if (idInput && /^\d+$/.test(idInput.value)) return idInput.value;
+  const urlMatch = html.match(/custlist\.nl\?[^"'<>]*[?&]id=(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+  const scrollMatch = html.match(/[?&]scrollid=(\d+)/i);
+  if (scrollMatch) return scrollMatch[1];
+  return null;
+};
+
 const extractNetSuiteFormError = (html) => {
   const doc = new DOMParser().parseFromString(html, "text/html");
   const selectors = [
@@ -728,6 +739,234 @@ const buildCustomRecordTypeValues = (args = {}) => {
   }
 
   return values;
+};
+
+const buildCustomListValues = (args = {}) => {
+  const values = {
+    ...(args.name !== undefined ? { name: args.name } : {}),
+    ...(args.scriptId !== undefined ? { scriptid: args.scriptId } : {}),
+    ...(args.description !== undefined ? { description: args.description } : {}),
+    ...(args.isOrdered !== undefined ? { isordered: args.isOrdered } : {}),
+    ...(args.isHierarchical !== undefined ? { hierarchical: args.isHierarchical } : {}),
+    ...(args.listFields && typeof args.listFields === "object" ? args.listFields : {})
+  };
+  if (values.scriptid !== undefined) {
+    values.scriptid = normalizeMetadataScriptId(values.scriptid, "customlist");
+  }
+  return values;
+};
+
+const CUSTOM_LIST_VALUE_FIELDS = [
+  "scriptid",
+  "value",
+  "value_term_ref",
+  "value_translations",
+  "value_sname_en",
+  "value_sname_fr_FR",
+  "value_sname_de_DE",
+  "value_sname_it_IT",
+  "valueid",
+  "abbreviation",
+  "isinactive",
+  "parent"
+];
+
+const parseCustomListSublistData = (data = "") => {
+  if (!data) return [];
+  return String(data).split("\x02").filter(Boolean).map((row) => {
+    const cols = row.split("\x01");
+    const item = {};
+    CUSTOM_LIST_VALUE_FIELDS.forEach((fieldId, index) => {
+      item[fieldId] = cols[index] ?? "";
+    });
+    return item;
+  });
+};
+
+const serializeCustomListSublistRows = (rows = []) => {
+  return rows.map((row) => CUSTOM_LIST_VALUE_FIELDS.map((fieldId) => row[fieldId] ?? "").join("\x01")).join("\x02");
+};
+
+const normalizeCustomListValueRow = (line, index, existing = null) => {
+  const tempId = "temp" + Date.now() + index;
+  const source = typeof line === "string" ? { value: line } : (line ?? {});
+  const valueId =
+    source.internalId ??
+    source.valueid ??
+    source.id ??
+    existing?.valueid ??
+    "";
+  const displayValue =
+    source.value ??
+    source.name ??
+    source.label ??
+    source.display ??
+    existing?.value ??
+    "";
+
+  return {
+    scriptid: existing?.scriptid ?? (source.scriptId !== undefined && source.scriptId !== null ? normalizeMetadataScriptId(source.scriptId, "customlist") : ""),
+    value: displayValue,
+    value_term_ref: source.valueTermRef ?? source.value_term_ref ?? existing?.value_term_ref ?? "",
+    value_translations: source.valueTranslations ?? source.value_translations ?? existing?.value_translations ?? "",
+    value_sname_en: source.value_sname_en ?? existing?.value_sname_en ?? "",
+    value_sname_fr_FR: source.value_sname_fr_FR ?? existing?.value_sname_fr_FR ?? "",
+    value_sname_de_DE: source.value_sname_de_DE ?? existing?.value_sname_de_DE ?? "",
+    value_sname_it_IT: source.value_sname_it_IT ?? existing?.value_sname_it_IT ?? "",
+    valueid: valueId,
+    abbreviation: source.abbreviation ?? source.valueId ?? existing?.abbreviation ?? "",
+    isinactive: source.isInactive === true || source.inactive === true ? "T" : source.isInactive === false || source.inactive === false ? "F" : existing?.isinactive ?? "F",
+    parent: source.parent ?? existing?.parent ?? tempId
+  };
+};
+
+const findCustomListExistingRow = (rows, line) => {
+  if (typeof line === "string") {
+    return rows.find((row) => row.value === line) ?? null;
+  }
+
+  const internalId = line?.internalId ?? line?.valueid ?? line?.id;
+  if (internalId !== undefined && internalId !== null && internalId !== "") {
+    const byId = rows.find((row) => String(row.valueid) === String(internalId));
+    if (byId) return byId;
+  }
+
+  const originalValue =
+    line?.currentValue ??
+    line?.oldValue ??
+    line?.originalValue ??
+    line?.previousValue ??
+    line?.from;
+  if (originalValue !== undefined && originalValue !== null && originalValue !== "") {
+    const byOriginalValue = rows.find((row) => row.value === String(originalValue));
+    if (byOriginalValue) return byOriginalValue;
+  }
+
+  const value = line?.value ?? line?.name ?? line?.label ?? line?.display;
+  if (value !== undefined && value !== null && value !== "") {
+    const byValue = rows.find((row) => row.value === String(value));
+    if (byValue) return byValue;
+  }
+  return null;
+};
+
+const mergeCustomListSublistRows = (currentData, values = [], replaceValues = false) => {
+  const existingRows = parseCustomListSublistData(currentData);
+  if (replaceValues) {
+    return values.map((line, index) => normalizeCustomListValueRow(line, index, findCustomListExistingRow(existingRows, line)));
+  }
+
+  const rows = existingRows.map((row) => ({ ...row }));
+  values.forEach((line, index) => {
+    const existing = findCustomListExistingRow(rows, line);
+    const normalized = normalizeCustomListValueRow(line, rows.length + index, existing);
+    if (existing) {
+      const rowIndex = rows.indexOf(existing);
+      rows[rowIndex] = normalized;
+    } else {
+      rows.push(normalized);
+    }
+  });
+  return rows;
+};
+
+const applyCustomListValueOperations = (currentData, args = {}) => {
+  let rows = parseCustomListSublistData(currentData).map((row) => ({ ...row }));
+  const summary = {
+    mode: "preserve",
+    added: 0,
+    updated: 0,
+    skippedExisting: [],
+    notFound: []
+  };
+
+  const replaceAllValues = args.replaceAllValues ?? args.setValues;
+  if (Array.isArray(replaceAllValues)) {
+    rows = replaceAllValues.map((line, index) =>
+      normalizeCustomListValueRow(line, index, findCustomListExistingRow(rows, line))
+    );
+    summary.mode = "replaceAllValues";
+    summary.updated = rows.length;
+    return { rows, summary };
+  }
+
+  if (Array.isArray(args.values ?? args.listValues)) {
+    rows = mergeCustomListSublistRows(
+      serializeCustomListSublistRows(rows),
+      args.values ?? args.listValues,
+      args.replaceValues === true
+    );
+    summary.mode = args.replaceValues === true ? "legacyReplaceValues" : "legacyUpsertValues";
+    summary.updated = rows.length;
+    return { rows, summary };
+  }
+
+  const valuesToAdd = args.valuesToAdd ?? args.addValues;
+  if (Array.isArray(valuesToAdd)) {
+    valuesToAdd.forEach((line, index) => {
+      const existing = findCustomListExistingRow(rows, line);
+      if (existing) {
+        summary.skippedExisting.push(existing.value);
+        return;
+      }
+      rows.push(normalizeCustomListValueRow(line, rows.length + index, null));
+      summary.added += 1;
+    });
+  }
+
+  const valuesToUpdate = args.valuesToUpdate ?? args.updateValues;
+  if (Array.isArray(valuesToUpdate)) {
+    valuesToUpdate.forEach((line, index) => {
+      const existing = findCustomListExistingRow(rows, line);
+      if (!existing) {
+        summary.notFound.push(typeof line === "string" ? line : (line?.currentValue ?? line?.oldValue ?? line?.value ?? line?.id ?? ""));
+        return;
+      }
+      const rowIndex = rows.indexOf(existing);
+      rows[rowIndex] = normalizeCustomListValueRow(line, rows.length + index, existing);
+      summary.updated += 1;
+    });
+  }
+
+  if (summary.added || summary.updated) {
+    summary.mode = "valueOperations";
+  }
+  return { rows, summary };
+};
+
+const normalizeCustomListLine = (line, index) => {
+  const tempId = "temp" + Date.now() + index;
+  if (typeof line === "string") {
+    return { value: line, abbreviation: "", isInactive: false, scriptId: "", valueId: "", parent: tempId };
+  }
+  return {
+    value: line?.value ?? line?.name ?? line?.label ?? "",
+    abbreviation: line?.abbreviation ?? line?.valueId ?? "",
+    isInactive: line?.isInactive === true || line?.inactive === true,
+    scriptId: line?.scriptId !== undefined && line?.scriptId !== null ? normalizeMetadataScriptId(line.scriptId, "customlist") : "",
+    valueId: line?.internalId ?? line?.valueid ?? "",
+    parent: line?.parent ?? tempId
+  };
+};
+
+const buildCustomListSublistData = (listValues = []) => {
+  return listValues.map((line, index) => {
+    const value = normalizeCustomListLine(line, index);
+    return [
+      value.scriptId,
+      value.value,
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      value.valueId,
+      value.abbreviation,
+      value.isInactive ? "T" : "F",
+      value.parent
+    ].join("\x01");
+  }).join("\x02");
 };
 
 const buildCustomRecordFieldValues = (args = {}) => {
@@ -829,6 +1068,30 @@ WHERE
       "[createCustomRecordType] Existing record lookup failed:",
       err
     );
+    return null;
+  }
+};
+
+const findExistingCustomList = async (N, listValues) => {
+  const conditions = [];
+  const expectedScriptId = getMetadataScriptId(listValues.scriptid, "CUSTOMLIST");
+  if (expectedScriptId) {
+    conditions.push("UPPER(ScriptID) = UPPER(" + sqlLiteral(expectedScriptId) + ")");
+  }
+  if (listValues.name) {
+    conditions.push("UPPER(Name) = UPPER(" + sqlLiteral(listValues.name) + ")");
+  }
+  if (conditions.length === 0) return null;
+  const sql = [
+    "SELECT InternalID, Name, ScriptID",
+    "FROM CustomList",
+    "WHERE (" + conditions.join(" OR ") + ")",
+    "AND ROWNUM <= 1"
+  ].join("\n");
+  try {
+    return await firstSuiteQLRow(N, sql);
+  } catch (err) {
+    console.warn("[createCustomList] Existing list lookup failed:", err);
     return null;
   }
 };
@@ -943,6 +1206,259 @@ const createCustomRecordType = async (N, args = {}) => {
     recordType: "customrecordtype",
     recordValues,
     note: "Create custom fields with CREATE_CUSTOM_RECORD_FIELD after confirming this ID."
+  };
+};
+
+const createCustomList = async (N, args = {}) => {
+  const { runtime, url } = N;
+  const listValues = buildCustomListValues(args);
+  if (!listValues.name) throw new Error("name is required.");
+  if (!listValues.scriptid) throw new Error("scriptId is required.");
+  const values = Array.isArray(args.values ?? args.listValues) ? args.values ?? args.listValues : [];
+  if (values.length === 0) throw new Error("values must contain at least one custom list value.");
+
+  const existing = await findExistingCustomList(N, listValues);
+  if (existing) {
+    return {
+      success: true,
+      existed: true,
+      id: existing.internalid ?? existing.InternalID,
+      recordType: "customlist",
+      existing,
+      listValues,
+      note: "A matching custom list already exists; returning its ID instead of creating a duplicate."
+    };
+  }
+
+  const domain = url?.resolveDomain ? url.resolveDomain({ hostType: url.HostType.APPLICATION }) : window.location.host;
+  const { accountId, csrfToken } = window.getNetsiteParams();
+  const currentUser = runtime?.getCurrentUser ? runtime.getCurrentUser() : {};
+  const ownerId = String(currentUser.id ?? "");
+  const ownerName = currentUser.name || "";
+  const isOrdered = listValues.isordered === false ? "F" : "T";
+  const isHierarchical = listValues.hierarchical === true ? "T" : "F";
+
+  const params = new URLSearchParams({
+    submitter: "Save",
+    name: listValues.name,
+    name_send: "",
+    package: "",
+    scriptid: listValues.scriptid,
+    "nsutils-automated-ids": "on",
+    inpt_owner: ownerName,
+    owner: ownerId,
+    description: listValues.description ?? "",
+    isordered: isOrdered,
+    _eml_nkey_: accountId + "~" + ownerId + "~" + (currentUser.role ?? "") + "~N",
+    _multibtnstate_: "",
+    selectedtab: "",
+    nsapiPI: "",
+    nsapiSR: "",
+    nsapiVF: "",
+    nsapiFC: "",
+    nsapiPS: "",
+    nsapiVI: "",
+    nsapiVD: "",
+    nsapiPD: "",
+    nsapiVL: "",
+    nsapiRC: "",
+    nsapiLI: "",
+    nsapiLC: "",
+    nsapiCT: Date.now().toString(),
+    nsbrowserenv: "istop=T",
+    type: "custlist",
+    id: "",
+    externalid: "",
+    whence: "",
+    customwhence: "",
+    entryformquerystring: "",
+    _csrf: csrfToken,
+    hierarchical: isHierarchical,
+    target: "",
+    name_term_ref: "",
+    colrefname: "",
+    submitted: "T",
+    formdisplayview: "NONE",
+    _button: "",
+    customvaluefields: "scriptid\x01value\x01value_term_ref\x01value_translations\x01value_sname_en\x01value_sname_fr_FR\x01value_sname_de_DE\x01value_sname_it_IT\x01valueid\x01abbreviation\x01isinactive\x01parent",
+    customvalueflags: "0\x011\x010\x010\x010\x010\x010\x010\x010\x010\x010\x010",
+    customvaluefieldsets: "\x01\x01\x01\x01value_translations\x01value_translations\x01value_translations\x01value_translations\x01\x01\x01\x01",
+    customvaluetypes: "identifier\x01text\x01text\x01fieldset\x01text\x01text\x01text\x01text\x01integer\x01text\x01checkbox\x01text",
+    customvalueorigtypes: "\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01select",
+    customvalueparents: "\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01",
+    customvaluelabels: "\x01Value\x01\x01Translation\x01English (International)\x01French (France)\x01German\x01Italian\x01Internal ID\x01\x01Inactive\x01",
+    customvaluedata: buildCustomListSublistData(values),
+    nextcustomvalueidx: String(values.length + 1),
+    customvaluevalid: "T",
+    translationsfields: "locale\x01localedescription\x01name",
+    translationsflags: "0\x010\x014",
+    translationsfieldsets: "\x01\x01",
+    translationstypes: "text\x01text\x01text",
+    translationsorigtypes: "\x01\x01",
+    translationsparents: "\x01\x01",
+    translationslabels: "\x01Language\x01Translation",
+    translationsdata: "en\x01English (International)\x01\x02fr_FR\x01French (France)\x01\x02de_DE\x01German\x01\x02it_IT\x01Italian\x01",
+    nexttranslationsidx: "5",
+    translationsvalid: "T",
+    translationssortidx: "0",
+    translationssorttype: "TEXT",
+    translationssortdir: "UP",
+    translationssortname: "localedescription",
+    translationssort2dir: "",
+    translationssort2name: ""
+  });
+
+  Object.entries(listValues).forEach(([fieldId, value]) => {
+    if (value !== undefined && !["name", "scriptid", "description", "isordered", "hierarchical"].includes(fieldId)) {
+      setIfPresent(params, fieldId, value);
+    }
+  });
+
+  const response = await fetch("https://" + domain + "/app/common/custom/custlist.nl", {
+    method: "POST",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      priority: "u=0, i",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer: "https://" + domain + "/app/common/custom/custlist.nl?whence=",
+    body: params.toString()
+  });
+
+  const html = await response.text();
+  if (!response.ok) throw new Error("Custom list form save failed: HTTP " + response.status);
+  const formError = extractNetSuiteFormError(html);
+  const id = extractCustomListIdFromHtml(html);
+  if (!id && formError) throw new Error("Custom list form save failed: " + formError);
+  if (!id) {
+    throw new Error("Custom list form save completed but no list ID was found in the response. " + html.replace(/\s+/g, " ").slice(0, 500));
+  }
+
+  return {
+    success: true,
+    existed: false,
+    id,
+    recordType: "customlist",
+    url: "https://" + domain + "/app/common/custom/custlist.nl?id=" + encodeURIComponent(id),
+    listValues,
+    valueCount: values.length
+  };
+};
+
+const updateCustomList = async (N, args = {}) => {
+  const { runtime, url } = N;
+  const listId = String(args.listId ?? args.id ?? "").trim();
+  if (!listId) throw new Error("listId is required.");
+
+  const domain = url?.resolveDomain ? url.resolveDomain({ hostType: url.HostType.APPLICATION }) : window.location.host;
+  const editUrl = "https://" + domain + "/app/common/custom/custlist.nl?id=" + encodeURIComponent(listId) + "&e=T&ord=T";
+  const editResponse = await fetch(editUrl, {
+    method: "GET",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "cache-control": "max-age=0",
+      "upgrade-insecure-requests": "1"
+    }
+  });
+  const editHtml = await editResponse.text();
+  if (!editResponse.ok) throw new Error("Custom list edit form load failed: HTTP " + editResponse.status);
+
+  const { params } = readFormDefaults(editHtml);
+  const listValues = buildCustomListValues(args);
+  const currentUser = runtime?.getCurrentUser ? runtime.getCurrentUser() : {};
+  const { accountId, csrfToken } = window.getNetsiteParams();
+  const ownerId = String(currentUser.id ?? params.get("owner") ?? "");
+  const ownerName = currentUser.name || params.get("inpt_owner") || "";
+
+  params.set("submitter", "Save");
+  params.set("type", "custlist");
+  params.set("id", listId);
+  params.set("_csrf", csrfToken || params.get("_csrf") || "");
+  params.set("_eml_nkey_", accountId + "~" + ownerId + "~" + (currentUser.role ?? "") + "~N");
+  params.set("nsapiCT", Date.now().toString());
+  params.set("nsbrowserenv", "istop=T");
+  params.set("whence", "/app/common/custom/custlists.nl?scrollid=" + listId);
+  params.set("entryformquerystring", "id=" + listId + "&e=T&ord=T");
+  if (ownerId) params.set("owner", ownerId);
+  if (ownerName) params.set("inpt_owner", ownerName);
+
+  if (listValues.name !== undefined) {
+    params.set("name", String(listValues.name));
+    params.set("name_send", String(listValues.name));
+  }
+  if (listValues.scriptid !== undefined) params.set("scriptid", String(listValues.scriptid));
+  if (listValues.description !== undefined) params.set("description", String(listValues.description));
+  if (listValues.isordered !== undefined) params.set("isordered", listValues.isordered === false ? "F" : "T");
+  if (listValues.hierarchical !== undefined) params.set("hierarchical", listValues.hierarchical === true ? "T" : "F");
+
+  Object.entries(listValues).forEach(([fieldId, value]) => {
+    if (value !== undefined && !["name", "scriptid", "description", "isordered", "hierarchical"].includes(fieldId)) {
+      setIfPresent(params, fieldId, value);
+    }
+  });
+
+  const hasValueOperations =
+    Array.isArray(args.replaceAllValues ?? args.setValues) ||
+    Array.isArray(args.valuesToAdd ?? args.addValues) ||
+    Array.isArray(args.valuesToUpdate ?? args.updateValues) ||
+    Array.isArray(args.values ?? args.listValues);
+  let submittedValueCount;
+  let valueOperationSummary;
+  if (hasValueOperations) {
+    const { rows, summary } = applyCustomListValueOperations(params.get("customvaluedata") || "", args);
+    submittedValueCount = rows.length;
+    valueOperationSummary = summary;
+    params.set("customvaluedata", serializeCustomListSublistRows(rows));
+    params.set("nextcustomvalueidx", String(rows.length + 1));
+    params.set("customvaluevalid", "T");
+  }
+
+  const response = await fetch("https://" + domain + "/app/common/custom/custlist.nl", {
+    method: "POST",
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "accept-language": "it-IT,it;q=0.6",
+      "cache-control": "max-age=0",
+      "content-type": "application/x-www-form-urlencoded",
+      priority: "u=0, i",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "upgrade-insecure-requests": "1"
+    },
+    referrer: editUrl,
+    body: params.toString()
+  });
+
+  const html = await response.text();
+  if (!response.ok) throw new Error("Custom list form update failed: HTTP " + response.status);
+  const formError = extractNetSuiteFormError(html);
+  const savedId = extractCustomListIdFromHtml(html) || listId;
+  if (!savedId && formError) throw new Error("Custom list form update failed: " + formError);
+
+  return {
+    success: true,
+    id: savedId,
+    recordType: "customlist",
+    url: "https://" + domain + "/app/common/custom/custlist.nl?id=" + encodeURIComponent(savedId),
+    updatedFields: Object.keys(listValues),
+    valueCount: submittedValueCount,
+    valueOperations: valueOperationSummary,
+    replacedValues: args.replaceValues === true || Array.isArray(args.replaceAllValues ?? args.setValues)
   };
 };
 
@@ -2252,6 +2768,14 @@ const handlers = {
   GET_CUSTOM_LIST_ITEMS: async ({ modules, payload }) => {
     console.log("Get Custom List Items action received", payload);
     return window.getCustomListItems(modules, payload);
+  },
+  CREATE_CUSTOM_LIST: async ({ modules, payload }) => {
+    console.log("Create Custom List action received");
+    return createCustomList(modules, payload);
+  },
+  UPDATE_CUSTOM_LIST: async ({ modules, payload }) => {
+    console.log("Update Custom List action received");
+    return updateCustomList(modules, payload);
   },
   CREATE_RECORD: async ({ modules, payload }) => {
     console.log("Create Record action received", payload);
