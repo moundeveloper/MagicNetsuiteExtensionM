@@ -1022,6 +1022,24 @@ const MCP_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "netsuite_switch_environment",
+    description:
+      "Switch the NetSuite account environment used by subsequent MCP tool calls. " +
+      "Pass an account ID such as 1964539 or 9937091_SB1. The extension selects a connected tab for that account, " +
+      "or opens a dedicated background tab when necessary. Use an empty accountId to restore active-tab routing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        accountId: {
+          type: "string",
+          description:
+            "NetSuite account ID from the account subdomain, e.g. 1964539 or 9937091_SB1. Empty string clears the preference."
+        }
+      },
+      required: ["accountId"]
+    }
+  },
+  {
     name: "suiteql_get_guide",
     description:
       "CALL THIS FIRST before any SuiteQL work. Returns the complete usage guide: correct syntax rules (no LIMIT — use ROWNUM), the mandatory discovery workflow, common table names, and worked examples.",
@@ -1506,6 +1524,7 @@ const MCP_TOOL_DEFINITIONS = [
       "Find or create a NetSuite custom record type metadata record using customrecordtype. " +
       "If an existing custom record type matches the normalized scriptId or recordname, returns that internal ID instead of creating a duplicate. " +
       "Set body fields with recordFields or convenience keys. The name key maps to recordname. " +
+      "The Include Name Field checkbox is off by default; set includeNameField true to enable it. " +
       "The scriptId key accepts either 'customrecord_my_type' or 'my_type' and is normalized so NetSuite saves CUSTOMRECORD_MY_TYPE. " +
       "Create fields afterward with netsuite_create_custom_record_field to avoid orphaned record types if a field save fails.",
     inputSchema: {
@@ -1522,6 +1541,10 @@ const MCP_TOOL_DEFINITIONS = [
         description: {
           type: "string",
           description: "Convenience value for the description field."
+        },
+        includeNameField: {
+          type: "boolean",
+          description: "Whether to check NetSuite's Include Name Field option. Defaults to false."
         },
         recordFields: {
           type: "object",
@@ -1593,6 +1616,55 @@ const MCP_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "netsuite_update_custom_record_field",
+    description:
+      "Edit an existing NetSuite custom record field using the native custreccustfield.nl edit form POST. " +
+      "The tool loads the existing edit form first, preserves NetSuite metadata/sublist fields, and overrides only the provided friendly fields and fieldValues.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        customRecordFieldId: {
+          type: "string",
+          description: "Internal ID of the custom record field to edit."
+        },
+        customFieldId: {
+          type: "string",
+          description: "Alias for customRecordFieldId."
+        },
+        fieldId: {
+          type: "string",
+          description: "Alias for customRecordFieldId."
+        },
+        customRecordTypeId: {
+          type: "string",
+          description: "Internal ID of the parent custom record type; posted as rectype."
+        },
+        customRecordTypeInternalId: {
+          type: "string",
+          description: "Alias for customRecordTypeId."
+        },
+        label: { type: "string" },
+        fieldType: {
+          type: "string",
+          examples: CUSTOM_RECORD_FIELD_TYPE_HINTS,
+          description: "Optional new fieldtype value. If omitted, the existing type is preserved."
+        },
+        selectRecordType: {
+          type: "string",
+          description: "Convenience value for selectrecordtype when fieldType is SELECT or MULTISELECT."
+        },
+        description: { type: "string" },
+        storeValue: { type: "boolean" },
+        showInList: { type: "boolean" },
+        fieldValues: {
+          type: "object",
+          description: "Additional raw form fieldId-to-value pairs to include in the custreccustfield.nl POST. rectype and id are always set by the tool."
+        }
+      },
+      required: ["customRecordFieldId", "customRecordTypeId"]
+    }
+  },
+  {
     name: "netsuite_create_script_field",
     description:
       "Find or create a NetSuite script parameter field using the native scriptcustfield.nl form POST. " +
@@ -1630,6 +1702,50 @@ const MCP_TOOL_DEFINITIONS = [
           description: "Additional raw form fieldId-to-value pairs to include in the scriptcustfield.nl POST. scripttype is always set by the tool."
         }
       }
+    }
+  },
+  {
+    name: "netsuite_update_script_field",
+    description:
+      "Edit an existing NetSuite script parameter field using the native scriptcustfield.nl edit form POST. " +
+      "The tool loads the existing edit form first, preserves NetSuite metadata/sublist fields, and overrides only the provided friendly fields and fieldValues.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scriptFieldId: {
+          type: "string",
+          description: "Internal ID of the script parameter field to edit."
+        },
+        fieldId: {
+          type: "string",
+          description: "Alias for scriptFieldId."
+        },
+        scriptInternalId: {
+          type: "string",
+          description: "Internal ID of the parent script record; posted as scripttype."
+        },
+        scriptRecordId: {
+          type: "string",
+          description: "Alias for scriptInternalId."
+        },
+        label: { type: "string" },
+        fieldType: {
+          type: "string",
+          examples: CUSTOM_RECORD_FIELD_TYPE_HINTS,
+          description: "Optional new fieldtype value. If omitted, the existing type is preserved."
+        },
+        selectRecordType: {
+          type: "string",
+          description: "Convenience value for selectrecordtype when fieldType is SELECT or MULTISELECT."
+        },
+        description: { type: "string" },
+        storeValue: { type: "boolean" },
+        fieldValues: {
+          type: "object",
+          description: "Additional raw form fieldId-to-value pairs to include in the scriptcustfield.nl POST. scripttype and id are always set by the tool."
+        }
+      },
+      required: ["scriptFieldId", "scriptInternalId"]
     }
   },
   {
@@ -2364,7 +2480,9 @@ async function handleRequest({ requestId, method, params }) {
       }
 
       try {
-        if (name === "ping") {
+        if (name === "netsuite_switch_environment") {
+          result = await handleNetsuiteSwitchEnvironment(args);
+        } else if (name === "ping") {
           // Include account info so agents can discover which account is targeted
           const storageForPing = await chrome.storage.sync.get(["magic_netsuite_settings"]);
           const pingAccount = storageForPing?.magic_netsuite_settings?.mcpPreferredAccount || null;
@@ -2413,8 +2531,12 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteInspectCustomRecordField(args);
         } else if (name === "netsuite_create_custom_record_field") {
           result = await handleNetsuiteCreateCustomRecordField(args);
+        } else if (name === "netsuite_update_custom_record_field") {
+          result = await handleNetsuiteUpdateCustomRecordField(args);
         } else if (name === "netsuite_create_script_field") {
           result = await handleNetsuiteCreateScriptField(args);
+        } else if (name === "netsuite_update_script_field") {
+          result = await handleNetsuiteUpdateScriptField(args);
         } else if (name === "netsuite_read_file") {
           result = await handleNetsuiteReadFile(args);
         } else if (name === "netsuite_find_file") {
@@ -2508,7 +2630,12 @@ async function handleRequest({ requestId, method, params }) {
       throw new Error(`Unknown method: ${method}`);
     }
 
-    return { requestId, success: true, result, account: mcpDedicatedTabAccountId || null };
+    const responseStorage = await chrome.storage.sync.get(["magic_netsuite_settings"]);
+    const responseAccount =
+      mcpDedicatedTabAccountId ||
+      responseStorage?.magic_netsuite_settings?.mcpPreferredAccount ||
+      null;
+    return { requestId, success: true, result, account: responseAccount };
   } catch (err) {
     // Handle non-Error throws (plain objects, strings) that have no .message
     const msg =
@@ -2524,6 +2651,48 @@ async function handleRequest({ requestId, method, params }) {
 // -----------------------------
 // SuiteQL Tool Handler
 // -----------------------------
+async function handleNetsuiteSwitchEnvironment(args = {}) {
+  const requestedAccount = String(args.accountId ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/-/g, "_");
+  const storageResult = await chrome.storage.sync.get(["magic_netsuite_settings"]);
+  const settings = storageResult?.magic_netsuite_settings || {};
+
+  await chrome.storage.sync.set({
+    magic_netsuite_settings: {
+      ...settings,
+      mcpPreferredAccount: requestedAccount
+    }
+  });
+
+  if (!requestedAccount) {
+    const tab = await getActiveNetsuiteTab();
+    return asMcpTextResult({
+      switched: true,
+      accountId: extractAccountIdFromUrl(tab.url),
+      routing: "active-tab",
+      tabId: tab.id
+    });
+  }
+
+  const tab = await getPreferredNetsuiteTab();
+  const resolvedAccount = extractAccountIdFromUrl(tab.url);
+  if (resolvedAccount !== requestedAccount) {
+    throw new Error(
+      `Could not route MCP calls to account ${requestedAccount}; selected tab belongs to ${resolvedAccount || "unknown"}.`
+    );
+  }
+
+  return asMcpTextResult({
+    switched: true,
+    accountId: resolvedAccount,
+    routing: tab.id === mcpDedicatedTabId ? "dedicated-tab" : "connected-tab",
+    tabId: tab.id,
+    url: tab.url
+  });
+}
+
 async function handleSuiteQLTool(toolName, args) {
   const actionMap = {
     "suiteql_search_tables": "FETCH_SUITEQL_TABLES",
@@ -3168,11 +3337,56 @@ async function handleNetsuiteCreateCustomRecordField(args) {
   };
 }
 
+async function handleNetsuiteUpdateCustomRecordField(args) {
+  const customRecordFieldId = String(args?.customRecordFieldId ?? args?.customFieldId ?? args?.fieldId ?? args?.id ?? "").trim();
+  const customRecordTypeId = String(args?.customRecordTypeId ?? args?.customRecordTypeInternalId ?? args?.recordTypeId ?? "").trim();
+  if (!customRecordFieldId) throw new Error("customRecordFieldId is required.");
+  if (!customRecordTypeId) throw new Error("customRecordTypeId is required.");
+
+  const result = await callNetsuiteRoute(
+    "UPDATE_CUSTOM_RECORD_FIELD",
+    {
+      ...args,
+      customRecordFieldId,
+      customRecordTypeId
+    },
+    "Failed to update custom record field."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
 async function handleNetsuiteCreateScriptField(args) {
   const result = await callNetsuiteRoute(
     "CREATE_SCRIPT_FIELD",
     args,
     "Failed to create script field."
+  );
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify(result, null, 2)
+    }]
+  };
+}
+
+async function handleNetsuiteUpdateScriptField(args) {
+  const scriptFieldId = String(args?.scriptFieldId ?? args?.fieldId ?? args?.id ?? "").trim();
+  const scriptInternalId = String(args?.scriptInternalId ?? args?.scriptRecordId ?? args?.parentScriptId ?? "").trim();
+  if (!scriptFieldId) throw new Error("scriptFieldId is required.");
+  if (!scriptInternalId) throw new Error("scriptInternalId is required.");
+
+  const result = await callNetsuiteRoute(
+    "UPDATE_SCRIPT_FIELD",
+    {
+      ...args,
+      scriptFieldId,
+      scriptInternalId
+    },
+    "Failed to update script field."
   );
   return {
     content: [{
@@ -5874,3 +6088,5 @@ function sendMessageToTab(tabId, message) {
     });
   });
 }
+
+

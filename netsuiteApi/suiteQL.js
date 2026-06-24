@@ -63,7 +63,13 @@ const discoverSuiteletScript = async (N) => {
   }
 };
 
-const runSuiteQLViaScriptlet = async (N, sql, limit, returnTotals) => {
+const runSuiteQLViaScriptlet = async (
+  N,
+  sql,
+  limit,
+  returnTotals,
+  offset = 0
+) => {
   const scriptInfo = await discoverSuiteletScript(N);
   if (!scriptInfo) {
     throw new Error("Failed to discover active SuiteQL suitelet script");
@@ -76,8 +82,8 @@ const runSuiteQLViaScriptlet = async (N, sql, limit, returnTotals) => {
   const requestPayload = {
     function: "queryExecute",
     query: sql,
-    rowBegin: 0,
-    rowEnd: limit ?? 1000,
+    rowBegin: offset,
+    rowEnd: offset + (limit ?? 1000),
     paginationEnabled: true,
     viewsEnabled: false,
     returnTotals
@@ -186,10 +192,11 @@ window.fetchSuiteQLTableDetail = async (tableName) => {
  * @param {number|null} limit - Max rows to return (null = all)
  * @returns {{ results: object[], totalCount: number }}
  */
-window.runSuiteQLQuery = async (N, sql, limit) => {
+window.runSuiteQLQuery = async (N, sql, limit, offset = 0) => {
   const { query } = N;
   const effectiveLimit =
     limit === null || limit === undefined ? Infinity : limit;
+  const effectiveOffset = Math.max(0, Number(offset) || 0);
 
   // If governance is running low, skip the paged N/query path entirely and
   // delegate to the suitelet, which runs under its own governance budget.
@@ -203,7 +210,8 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
         N,
         sql,
         limit ?? 1000,
-        effectiveLimit !== Infinity
+        effectiveLimit !== Infinity,
+        effectiveOffset
       );
     }
   } catch {
@@ -211,26 +219,37 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
   }
 
   try {
+    const pageSize =
+      effectiveLimit === Infinity
+        ? 1000
+        : Math.max(5, Math.min(1000, effectiveLimit));
     const pagedData = await query.runSuiteQLPaged.promise({
       query: sql,
-      pageSize: 1000
+      pageSize
     });
     const totalCount = pagedData.count;
 
     const results = [];
+    const firstPageIndex = Math.floor(effectiveOffset / pageSize);
+    const offsetWithinFirstPage = effectiveOffset % pageSize;
+    const rowsNeeded =
+      effectiveLimit === Infinity
+        ? Infinity
+        : offsetWithinFirstPage + effectiveLimit;
 
     for (const pageRange of pagedData.pageRanges) {
-      if (results.length >= effectiveLimit) break;
+      if (pageRange.index < firstPageIndex) continue;
+      if (results.length >= rowsNeeded) break;
       const page = await pagedData.fetch.promise({ index: pageRange.index });
       const rows = page.data.asMappedResults();
       results.push(...rows);
+      if (results.length >= rowsNeeded) break;
     }
 
     return {
-      results: results.slice(
-        0,
-        effectiveLimit === Infinity ? undefined : effectiveLimit
-      ),
+      results: results.slice(offsetWithinFirstPage, effectiveLimit === Infinity
+        ? undefined
+        : offsetWithinFirstPage + effectiveLimit),
       totalCount
     };
   } catch (primaryErr) {
@@ -240,7 +259,13 @@ window.runSuiteQLQuery = async (N, sql, limit) => {
     );
     const returnTotals = effectiveLimit !== Infinity;
     try {
-      return await runSuiteQLViaScriptlet(N, sql, limit ?? 1000, returnTotals);
+      return await runSuiteQLViaScriptlet(
+        N,
+        sql,
+        limit ?? 1000,
+        returnTotals,
+        effectiveOffset
+      );
     } catch (fallbackErr) {
       if (String(fallbackErr?.message ?? fallbackErr).includes("Failed to discover active SuiteQL suitelet script")) {
         throw primaryErr;

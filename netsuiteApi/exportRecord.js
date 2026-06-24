@@ -223,8 +223,9 @@ const extractToJsonFieldValue = (fieldObj) => {
     fieldObj.legacyStringValue ??
     fieldObj.value ??
     fieldObj.text ??
-    null;
-  return { value, text: value };
+    fieldObj;
+  const text = fieldObj.text ?? fieldObj.legacyStringValue ?? fieldObj.value ?? value;
+  return { value, text };
 };
 
 const shouldSkipHarnessField = (fieldId, display) => {
@@ -246,18 +247,15 @@ const normalizeToJsonSublistRows = (sublistData) => {
 
     const row = {};
     for (const [fieldId, fieldObj] of Object.entries(lineData)) {
-      const normalized = extractToJsonFieldValue(fieldObj);
-      const display = normalized.text ?? normalized.value;
-      if (display === null || display === undefined || display === "") continue;
-      row[fieldId] = normalized;
+      row[fieldId] = extractToJsonFieldValue(fieldObj);
     }
-    if (Object.keys(row).length > 0) rows.push(row);
+    rows.push(row);
   }
   return rows;
 };
 
 /**
- * Fast record load via record.load().toJSON() — used by the agent harness prefetch.
+ * Fast record load via record.load().toJSON().
  * Normalizes to the same { id, type, body, sublists } shape as loadRecordById so
  * consumers can treat both paths consistently. MCP / netsuite_load_record keeps
  * the slower getValue/getText path (bodyOnly).
@@ -271,18 +269,14 @@ window.loadRecordByIdToJson = (N, { type, id, includeSublists = true }) => {
   const body = {};
   const fields = json.fields || {};
   for (const [fieldId, fieldData] of Object.entries(fields)) {
-    const normalized = extractToJsonFieldValue(fieldData);
-    const display = normalized.text ?? normalized.value;
-    if (display === null || display === undefined || display === "") continue;
-    if (shouldSkipHarnessField(fieldId, display == null ? "" : String(display))) continue;
-    body[fieldId] = normalized;
+    body[fieldId] = extractToJsonFieldValue(fieldData);
   }
 
   const sublists = {};
   if (includeSublists && json.sublists && typeof json.sublists === "object") {
     for (const [sublistId, sublistData] of Object.entries(json.sublists)) {
       const rows = normalizeToJsonSublistRows(sublistData);
-      if (rows.length > 0) sublists[sublistId] = rows;
+      sublists[sublistId] = rows;
     }
   }
 
