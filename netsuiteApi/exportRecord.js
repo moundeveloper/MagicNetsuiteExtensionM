@@ -397,11 +397,14 @@ const readFieldProperty = (field, property) => {
  * @param {string[]|null} [options.fieldIds] - Optional body fields to inspect
  * @returns {{ type: string, fields: Record<string, { id: string, label: string, type: string, error?: string }> }}
  */
-window.getRecordFieldTypes = (N, { type, fieldIds = null }) => {
+window.getRecordFieldTypes = (N, { type, id = null, fieldIds = null }) => {
   if (!type) throw new Error("type is required");
 
   const { record } = N;
-  const tempRec = createTemporaryRecord(record, type);
+  const tempRec =
+    id !== null && id !== undefined && id !== ""
+      ? record.load({ type, id })
+      : createTemporaryRecord(record, type);
   const targetFields =
     Array.isArray(fieldIds) && fieldIds.length > 0
       ? fieldIds

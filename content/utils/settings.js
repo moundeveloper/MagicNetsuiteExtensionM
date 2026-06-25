@@ -15,7 +15,8 @@ export const initMagicNetsuiteSettings = async () => {
     drawerOpen: "ctrl+k",
     modulesSearch: "ctrl+m",
     elementScreenshotShortcut: "ctrl+shift+s",
-    openOnCustomizationPage: true
+    openOnCustomizationPage: true,
+    dashboardPreviewEnabled: false
   };
 
   console.log("[initMagicNetsuiteSettings] Settings created");

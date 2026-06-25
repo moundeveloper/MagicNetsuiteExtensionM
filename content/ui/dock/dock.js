@@ -45,8 +45,32 @@ export const createDock = async () => {
     "/app/setup/mainsetup.nl"
   );
   const isCustomizationPage = window.location.href.includes("sc=-90");
+  const isDashboardEnabler = new URL(window.location.href).searchParams.has(
+    "magicDashboardEnabler"
+  );
 
   if (injectAllowed && isCustomizationPage) {
+    if (isDashboardEnabler) {
+      injectUI("/processing");
+      showUI();
+      chrome.runtime.sendMessage({ type: "UI_SOURCE", source: "page" });
+      const iframe = document.getElementById(FRAME_ID);
+      const notifyReady = () => {
+        chrome.runtime.sendMessage({
+          type: "DASHBOARD_ENABLER_READY",
+          sessionId: new URL(window.location.href).searchParams.get(
+            "magicDashboardEnabler"
+          )
+        });
+      };
+      if (iframe) {
+        iframe.addEventListener("load", notifyReady, { once: true });
+      } else {
+        notifyReady();
+      }
+      return;
+    }
+
     dock.style.display = "block";
     injectUI();
 

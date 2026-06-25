@@ -123,7 +123,8 @@
     "declarativeNetRequest",
     "*://*.app.netsuite.com/*",
     "https://*.supabase.co/*",
-    "nativeMessaging"
+    "nativeMessaging",
+    "tabGroups"
   ],
   "declarative_net_request": {
     "rule_resources": [

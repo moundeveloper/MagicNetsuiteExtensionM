@@ -31,7 +31,7 @@ export const initExtension = async () => {
     setupFetchInterceptor();
 
     // Initialize UI components
-    initUIWidgets();
+    await initUIWidgets();
     await createDock();
     await createPalette();
 

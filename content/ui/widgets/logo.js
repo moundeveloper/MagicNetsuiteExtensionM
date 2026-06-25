@@ -5,6 +5,105 @@ const LOGO_HTML = `
 </svg>
 `;
 
+const DASHBOARD_BUTTON_ID = "magic-netsuite-dashboard-preview";
+const DASHBOARD_BUTTON_SLOT_ID = "magic-netsuite-dashboard-preview-slot";
+let dashboardPreviewEnabled = false;
+
+const sendRuntimeMessage = (message) =>
+  new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+
+const openDashboard = async (button) => {
+  button.disabled = true;
+  try {
+    const response = await sendRuntimeMessage({ type: "OPEN_DASHBOARD_PREVIEW" });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not open dashboard preview");
+    }
+  } catch (error) {
+    console.error("[Magic Netsuite] Dashboard preview failed", error);
+    button.title = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
+
+const addDashboardButton = (menuItemSpan) => {
+  if (!dashboardPreviewEnabled) {
+    document.getElementById(DASHBOARD_BUTTON_SLOT_ID)?.remove();
+    return;
+  }
+  if (document.getElementById(DASHBOARD_BUTTON_SLOT_ID)) return;
+
+  const customizationMenuItem = menuItemSpan.closest(
+    'div[data-widget="MenuItem"][data-automation-id="-90"]'
+  );
+  if (!customizationMenuItem?.parentElement) return;
+
+  // Keep this outside NetSuite's Customization MenuItem. Putting it inside the
+  // item lets the menu's hit area and event handlers swallow the button click.
+  document.getElementById(DASHBOARD_BUTTON_ID)?.remove();
+
+  const slot = document.createElement("div");
+  slot.id = DASHBOARD_BUTTON_SLOT_ID;
+  Object.assign(slot.style, {
+    alignSelf: "stretch",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flex: "0 0 auto",
+    padding: "0 6px",
+    position: "relative",
+    zIndex: "200000002",
+    pointerEvents: "auto"
+  });
+
+  const button = document.createElement("button");
+  button.id = DASHBOARD_BUTTON_ID;
+  button.type = "button";
+  button.title = "Open Magic NetSuite dashboard";
+  button.setAttribute("aria-label", "Open Magic NetSuite dashboard");
+  button.textContent = "↗";
+  Object.assign(button.style, {
+    width: "28px",
+    height: "28px",
+    border: "1px solid rgba(255,255,255,.35)",
+    borderRadius: "6px",
+    background: "rgba(255,255,255,.08)",
+    color: "#fff",
+    cursor: "pointer",
+    fontSize: "17px",
+    lineHeight: "24px",
+    position: "relative",
+    zIndex: "1",
+    pointerEvents: "auto"
+  });
+
+  for (const eventName of ["pointerdown", "mousedown"]) {
+    button.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  }
+
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+    void openDashboard(button);
+  });
+
+  slot.appendChild(button);
+  customizationMenuItem.insertAdjacentElement("afterend", slot);
+};
+
 const addLogo = () => {
   const menuItemSpan = document.querySelector(
     'div[data-widget="MenuItem"][data-automation-id="-90"] a span'
@@ -17,9 +116,15 @@ const addLogo = () => {
     menuItemSpan.style.alignItems = "center";
     menuItemSpan.style.gap = "0.5rem";
   }
+
+  if (menuItemSpan) addDashboardButton(menuItemSpan);
 };
 
-export const initUIWidgets = () => {
+export const initUIWidgets = async () => {
+  const stored = await chrome.storage.sync.get(["magic_netsuite_settings"]);
+  dashboardPreviewEnabled =
+    stored.magic_netsuite_settings?.dashboardPreviewEnabled === true;
+
   const menuContainer =
     document.querySelector('div[data-widget="Menu"]') || document.body;
 
@@ -27,4 +132,16 @@ export const initUIWidgets = () => {
   observer.observe(menuContainer, { childList: true, subtree: true });
 
   addLogo();
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "sync" || !changes.magic_netsuite_settings) return;
+    dashboardPreviewEnabled =
+      changes.magic_netsuite_settings.newValue?.dashboardPreviewEnabled ===
+      true;
+    if (!dashboardPreviewEnabled) {
+      document.getElementById(DASHBOARD_BUTTON_SLOT_ID)?.remove();
+    } else {
+      addLogo();
+    }
+  });
 };

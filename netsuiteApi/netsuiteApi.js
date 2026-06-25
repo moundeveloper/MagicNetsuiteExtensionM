@@ -3599,9 +3599,9 @@ const handlers = {
     console.log("Get Record Fields action received", { type });
     return window.getRecordFields(modules, { type });
   },
-  GET_RECORD_FIELD_TYPES: async ({ modules, payload: { type, fieldIds } }) => {
-    console.log("Get Record Field Types action received", { type, fieldIds });
-    return window.getRecordFieldTypes(modules, { type, fieldIds });
+  GET_RECORD_FIELD_TYPES: async ({ modules, payload: { type, id, fieldIds } }) => {
+    console.log("Get Record Field Types action received", { type, id, fieldIds });
+    return window.getRecordFieldTypes(modules, { type, id, fieldIds });
   },
   GET_CUSTOM_LISTS: async ({ modules, payload }) => {
     console.log("Get Custom Lists action received", payload);

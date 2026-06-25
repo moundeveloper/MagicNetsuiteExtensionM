@@ -22,6 +22,51 @@ const UI_VIEWS = {
 // GLOBALS
 let uiSource = UI_SOURCE.PANEL;
 let panelState = PANEL_STATE.CLOSE;
+const DASHBOARD_PREVIEW_SESSIONS_KEY = "magic_netsuite_dashboard_preview_sessions";
+const dashboardEnablerReadyWaiters = new Map();
+const readyDashboardEnablers = new Set();
+let dashboardPreviewOpenPromise = null;
+const DASHBOARD_TAB_TITLE = "Magic NetSuite";
+const DASHBOARD_ENABLER_TAB_TITLE = "Magic NetSuite · NetSuite Worker";
+const DASHBOARD_GROUP_TITLE = "Magic NetSuite";
+const TAB_GROUP_ID_NONE = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? -1;
+
+const chromeCallback = (invoke) =>
+  new Promise((resolve, reject) => {
+    invoke((result) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(result);
+    });
+  });
+
+const dashboardTabsQuery = (queryInfo) =>
+  chromeCallback((done) => chrome.tabs.query(queryInfo, done));
+const dashboardTabsGet = (tabId) =>
+  chromeCallback((done) => chrome.tabs.get(tabId, done));
+const dashboardTabsCreate = (createProperties) =>
+  chromeCallback((done) => chrome.tabs.create(createProperties, done));
+const dashboardTabsUpdate = (tabId, updateProperties) =>
+  chromeCallback((done) =>
+    chrome.tabs.update(tabId, updateProperties, done)
+  );
+const dashboardTabsRemove = (tabIds) =>
+  chromeCallback((done) => chrome.tabs.remove(tabIds, () => done()));
+const dashboardTabsGroup = (options) =>
+  chromeCallback((done) => chrome.tabs.group(options, done));
+const dashboardTabGroupsQuery = (queryInfo) =>
+  chromeCallback((done) => chrome.tabGroups.query(queryInfo, done));
+const dashboardTabGroupsGet = (groupId) =>
+  chromeCallback((done) => chrome.tabGroups.get(groupId, done));
+const dashboardTabGroupsUpdate = (groupId, updateProperties) =>
+  chromeCallback((done) =>
+    chrome.tabGroups.update(groupId, updateProperties, done)
+  );
+const dashboardWindowsUpdate = (windowId, updateInfo) =>
+  chromeCallback((done) => chrome.windows.update(windowId, updateInfo, done));
 
 // ── MCP: SuiteQL Agent Guide ──
 // Returned by the suiteql_get_guide tool so AI agents know exactly
@@ -282,6 +327,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     MCP_GET_TOOLS: handleMcpGetTools,
     MCP_INSTALL_INFO: handleMcpInstallInfo,
     NETSUITE_PROXY_FETCH: proxyNetsuiteIframeFetch,
+    LIST_OPEN_NETSUITE_ACCOUNTS: listOpenNetsuiteAccounts,
+    RECOVER_DASHBOARD_PREVIEW_SESSION: recoverDashboardPreviewSession,
+    OPEN_DASHBOARD_PREVIEW: openDashboardPreview,
+    SWITCH_DASHBOARD_ACCOUNT: switchDashboardAccount,
+    DASHBOARD_ENABLER_READY: dashboardEnablerReady,
     START_ELEMENT_SCREENSHOT_SELECTION: startElementScreenshotSelection,
     CAPTURE_ELEMENT_SCREENSHOT: captureElementScreenshot
   };
@@ -349,6 +399,681 @@ const setUISource = ({ message }) => {
   uiSource = message.source;
 
   return true; // True to allow Asyncronous message
+};
+
+const getDashboardPreviewSessions = async () => {
+  const result = await chrome.storage.session.get(DASHBOARD_PREVIEW_SESSIONS_KEY);
+  return result[DASHBOARD_PREVIEW_SESSIONS_KEY] || {};
+};
+
+const saveDashboardPreviewSessions = async (sessions) => {
+  await chrome.storage.session.set({
+    [DASHBOARD_PREVIEW_SESSIONS_KEY]: sessions
+  });
+};
+
+const dashboardEnablerReady = ({ message, sender }) => {
+  const readyKey = `${message.sessionId}:${sender.tab?.id}`;
+  const waiter = dashboardEnablerReadyWaiters.get(readyKey);
+  if (waiter && sender.tab?.id === waiter.tabId) {
+    clearTimeout(waiter.timer);
+    dashboardEnablerReadyWaiters.delete(readyKey);
+    waiter.resolve();
+  } else {
+    readyDashboardEnablers.add(readyKey);
+  }
+  return false;
+};
+
+const waitForDashboardEnablerReady = (sessionId, tabId, timeoutMs = 20000) =>
+  new Promise((resolve) => {
+    const readyKey = `${sessionId}:${tabId}`;
+    if (readyDashboardEnablers.delete(readyKey)) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      dashboardEnablerReadyWaiters.delete(readyKey);
+      resolve();
+    }, timeoutMs);
+    dashboardEnablerReadyWaiters.set(readyKey, { tabId, timer, resolve });
+  });
+
+const buildDashboardEnablerUrl = (sourceUrl, sessionId) => {
+  const url = new URL("/app/setup/mainsetup.nl", sourceUrl.origin);
+  url.searchParams.set("sc", "-90");
+  url.searchParams.set("magicDashboardEnabler", sessionId);
+  return url.href;
+};
+
+const getAccountIdFromUrl = (url) =>
+  new URL(url).hostname.split(".")[0].toUpperCase().replace(/-/g, "_");
+
+const getDashboardSessionIdFromTab = (tab, parameterName) => {
+  try {
+    return new URL(tab.url || tab.pendingUrl).searchParams.get(parameterName);
+  } catch {
+    return null;
+  }
+};
+
+const getDashboardTabUrl = (tab) => tab.url || tab.pendingUrl || "";
+
+const getMagicDashboardGroups = async () => {
+  const groups = (await dashboardTabGroupsQuery({})).filter(
+    (group) =>
+      String(group.title || "").trim().toLowerCase() ===
+      DASHBOARD_GROUP_TITLE.toLowerCase()
+  );
+  const result = [];
+  for (const group of groups) {
+    const tabs = await dashboardTabsQuery({
+      groupId: group.id,
+      windowId: group.windowId
+    });
+    result.push({ group, tabs });
+  }
+  return result;
+};
+
+const openExistingMagicDashboardGroup = async () => {
+  // Derive groups from the actual open tabs. This includes collapsed groups
+  // and avoids relying on a title-filtered query result.
+  const allTabs = await dashboardTabsQuery({});
+  const groupIds = [
+    ...new Set(
+      allTabs
+        .map((tab) => tab.groupId)
+        .filter((groupId) => groupId !== TAB_GROUP_ID_NONE)
+    )
+  ];
+  const groups = (
+    await Promise.all(
+      groupIds.map((groupId) =>
+        dashboardTabGroupsGet(groupId).catch(() => null)
+      )
+    )
+  ).filter(
+    (group) =>
+      group &&
+      String(group.title || "").trim().toLowerCase() ===
+        DASHBOARD_GROUP_TITLE.toLowerCase()
+  );
+  if (!groups.length) return null;
+
+  const group = groups[0];
+  const tabs = allTabs.filter((tab) => tab.groupId === group.id);
+  const dashboardTab =
+    tabs.find((tab) =>
+      getDashboardTabUrl(tab).includes("magicDashboardPreview=")
+    ) ||
+    tabs.find((tab) => tab.active) ||
+    tabs[0];
+  await dashboardTabGroupsUpdate(group.id, { collapsed: false });
+  await dashboardWindowsUpdate(group.windowId, { focused: true });
+  if (dashboardTab?.id) {
+    await dashboardTabsUpdate(dashboardTab.id, { active: true });
+  }
+
+  return { group, tabs, dashboardTab };
+};
+
+const removeDuplicateMagicDashboardGroups = async (groups, keeperGroupId) => {
+  for (const entry of groups) {
+    if (entry.group.id === keeperGroupId) continue;
+    const tabIds = entry.tabs.map((tab) => tab.id).filter(Boolean);
+    if (tabIds.length) {
+      await dashboardTabsRemove(tabIds).catch(() => undefined);
+    }
+  }
+};
+
+const recoverDashboardSessionFromGroup = async (entry, storedSessions) => {
+  const dashboardTab = entry.tabs.find((tab) =>
+    getDashboardTabUrl(tab).includes("magicDashboardPreview=")
+  );
+  const enablerTab = entry.tabs.find((tab) =>
+    getDashboardTabUrl(tab).includes("magicDashboardEnabler=")
+  );
+  if (!dashboardTab?.id || !enablerTab?.id) return null;
+
+  const dashboardSessionId = getDashboardSessionIdFromTab(
+    dashboardTab,
+    "magicDashboardPreview"
+  );
+  const enablerSessionId = getDashboardSessionIdFromTab(
+    enablerTab,
+    "magicDashboardEnabler"
+  );
+  const sessionId = dashboardSessionId || enablerSessionId;
+  if (!sessionId) return null;
+
+  // Repair legacy mismatched marker IDs by navigating the worker to the
+  // dashboard's session ID. The existing worker tab is retained.
+  if (dashboardSessionId && enablerSessionId !== dashboardSessionId) {
+    const repairedUrl = new URL(getDashboardTabUrl(enablerTab));
+    repairedUrl.searchParams.set(
+      "magicDashboardEnabler",
+      dashboardSessionId
+    );
+    await dashboardTabsUpdate(enablerTab.id, {
+      url: repairedUrl.href,
+      active: false,
+      autoDiscardable: false
+    });
+    await waitForTabComplete(enablerTab.id);
+  }
+
+  const stored = storedSessions[sessionId] || {};
+  const enablerUrl = getDashboardTabUrl(enablerTab);
+  const accountDomain = new URL(enablerUrl).hostname;
+  const session = {
+    ...stored,
+    sessionId,
+    accountId: getAccountIdFromUrl(enablerUrl),
+    accountDomain,
+    enablerTabId: enablerTab.id,
+    dashboardTabId: dashboardTab.id,
+    groupId: entry.group.id,
+    createdAt: stored.createdAt || 0
+  };
+  return { sessionId, session, dashboardTab, enablerTab };
+};
+
+const getLiveDashboardPreviewSession = async () => {
+  const sessions = await getDashboardPreviewSessions();
+  const existingGroups = await getMagicDashboardGroups();
+
+  if (existingGroups.length) {
+    const recovered = [];
+    for (const entry of existingGroups) {
+      const live = await recoverDashboardSessionFromGroup(entry, sessions);
+      if (live) recovered.push({ entry, live });
+    }
+
+    const keeperEntry =
+      recovered[0]?.entry ||
+      existingGroups.find((entry) =>
+        entry.tabs.some((tab) =>
+          getDashboardTabUrl(tab).includes("magicDashboardPreview=")
+        )
+      ) ||
+      existingGroups[0];
+    await removeDuplicateMagicDashboardGroups(
+      existingGroups,
+      keeperEntry.group.id
+    );
+
+    const keeper = recovered.find(
+      ({ entry }) => entry.group.id === keeperEntry.group.id
+    )?.live;
+    if (keeper) {
+      await saveDashboardPreviewSessions({
+        [keeper.sessionId]: keeper.session
+      });
+      await dashboardTabGroupsUpdate(keeper.session.groupId, {
+          title: DASHBOARD_GROUP_TITLE,
+          color: "blue"
+        })
+        .catch(() => undefined);
+      return keeper;
+    }
+
+    // The group itself is authoritative. Even if legacy tabs cannot be paired
+    // into a session, expand and focus the existing group instead of creating
+    // another one.
+    const dashboardTab =
+      keeperEntry.tabs.find((tab) =>
+        getDashboardTabUrl(tab).includes("magicDashboardPreview=")
+      ) || keeperEntry.tabs[0];
+    await saveDashboardPreviewSessions({});
+    return {
+      sessionId: null,
+      session: {
+        groupId: keeperEntry.group.id,
+        dashboardTabId: dashboardTab?.id || null
+      },
+      dashboardTab,
+      enablerTab: keeperEntry.tabs.find((tab) =>
+        getDashboardTabUrl(tab).includes("magicDashboardEnabler=")
+      )
+    };
+  }
+
+  const allTabs = await dashboardTabsQuery({});
+  const dashboardTabs = allTabs.filter(
+    (tab) =>
+      tab.id &&
+      tab.url?.startsWith(chrome.runtime.getURL("dist/vue-ui/index.html")) &&
+      tab.url.includes("magicDashboardPreview=")
+  );
+  const enablerTabs = allTabs.filter(
+    (tab) => tab.id && tab.url?.includes("magicDashboardEnabler=")
+  );
+  const liveSessions = [];
+  const recoveredSessions = {};
+
+  for (const dashboardTab of dashboardTabs) {
+    const dashboardUrl = new URL(dashboardTab.url);
+    const sessionId = dashboardUrl.searchParams.get("magicDashboardPreview");
+    if (!sessionId) continue;
+    const enablerTab = enablerTabs.find((tab) => {
+      try {
+        return (
+          new URL(tab.url).searchParams.get("magicDashboardEnabler") ===
+          sessionId
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (!enablerTab) continue;
+
+    const stored = sessions[sessionId] || {};
+    const accountDomain = new URL(enablerTab.url).hostname;
+    let groupId =
+      dashboardTab.groupId !== TAB_GROUP_ID_NONE
+        ? dashboardTab.groupId
+        : enablerTab.groupId;
+    if (groupId === TAB_GROUP_ID_NONE) {
+      groupId = await dashboardTabsGroup({
+        tabIds: [dashboardTab.id, enablerTab.id]
+      });
+    } else if (dashboardTab.groupId !== enablerTab.groupId) {
+      await dashboardTabsGroup({
+        groupId,
+        tabIds: [dashboardTab.id, enablerTab.id]
+      });
+    }
+
+    const session = {
+      ...stored,
+      sessionId,
+      accountId: getAccountIdFromUrl(enablerTab.url),
+      accountDomain,
+      enablerTabId: enablerTab.id,
+      dashboardTabId: dashboardTab.id,
+      groupId,
+      createdAt: stored.createdAt || 0
+    };
+    recoveredSessions[sessionId] = session;
+    liveSessions.push({ sessionId, session, dashboardTab, enablerTab });
+  }
+
+  liveSessions.sort(
+    (a, b) => Number(b.session.createdAt || 0) - Number(a.session.createdAt || 0)
+  );
+  const keeper = liveSessions[0] || null;
+
+  // Older duplicate preview groups can only come from previous versions of
+  // this flow. Consolidate them so there is exactly one live dashboard group.
+  for (const duplicate of liveSessions.slice(1)) {
+    delete recoveredSessions[duplicate.sessionId];
+    await dashboardTabsRemove([
+      duplicate.dashboardTab.id,
+      duplicate.enablerTab.id
+    ])
+      .catch(() => undefined);
+  }
+
+  await saveDashboardPreviewSessions(recoveredSessions);
+  if (keeper) {
+    await dashboardTabGroupsUpdate(keeper.session.groupId, {
+        title: DASHBOARD_GROUP_TITLE,
+        color: "blue"
+      })
+      .catch(() => undefined);
+  }
+  return keeper;
+};
+
+const focusDashboardPreviewSession = async (liveSession) => {
+  await dashboardTabGroupsUpdate(liveSession.session.groupId, {
+    collapsed: false
+  })
+    .catch(() => undefined);
+  const targetTab = liveSession.dashboardTab;
+  if (targetTab?.windowId) {
+    await dashboardWindowsUpdate(targetTab.windowId, { focused: true })
+      .catch(() => undefined);
+  }
+  if (targetTab?.id) {
+    await dashboardTabsUpdate(targetTab.id, { active: true });
+  }
+};
+
+const decorateDashboardPreviewTab = async (tabId, title) => {
+  try {
+    const faviconUrl = chrome.runtime.getURL("icons/icon32.png");
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (tabTitle, iconUrl) => {
+        const applyDecoration = () => {
+          if (document.title !== tabTitle) document.title = tabTitle;
+          document
+            .querySelectorAll('link[rel="icon"], link[rel="shortcut icon"]')
+            .forEach((node) => node.remove());
+          const icon = document.createElement("link");
+          icon.rel = "icon";
+          icon.type = "image/png";
+          icon.href = iconUrl;
+          document.head.appendChild(icon);
+        };
+
+        applyDecoration();
+        const root = document.head || document.documentElement;
+        const observer = new MutationObserver(() => {
+          if (document.title !== tabTitle) applyDecoration();
+        });
+        observer.observe(root, {
+          childList: true,
+          subtree: true,
+          characterData: true
+        });
+      },
+      args: [title, faviconUrl]
+    });
+  } catch (error) {
+    console.warn(`[Dashboard Preview] Could not decorate tab ${tabId}`, error);
+  }
+};
+
+const describeNetsuiteAccountTab = (tab, senderTabId) => {
+  try {
+    const url = new URL(tab.url);
+    const accountId = url.hostname
+      .split(".")[0]
+      .toUpperCase()
+      .replace(/-/g, "_");
+    const pageTitle = String(tab.title || "").trim();
+    return {
+      tabId: tab.id,
+      accountId,
+      label: pageTitle
+        ? `${accountId} — ${pageTitle}`
+        : accountId,
+      url: tab.url,
+      current: tab.id === senderTabId
+    };
+  } catch {
+    return null;
+  }
+};
+
+const listOpenNetsuiteAccounts = ({ message, sender, sendResponse }) => {
+  (async () => {
+    try {
+      const tabs = await dashboardTabsQuery({
+        url: "*://*.app.netsuite.com/*"
+      });
+      const candidates = tabs.filter(
+        (tab) =>
+          tab.id &&
+          tab.url &&
+          !tab.url.includes("tempTab=true") &&
+          !tab.url.includes("magicDashboardEnabler=")
+      );
+
+      const checks = await Promise.all(
+        candidates.map(async (tab) => {
+          try {
+            const response = await sendMessageToTab(tab.id, {
+              action: "CHECK_CONNECTION",
+              data: {},
+              mode: "normal"
+            });
+            return response?.message === "connected" ? tab : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      const sessions = await getDashboardPreviewSessions();
+      const selectedAccount = message.sessionId
+        ? sessions[message.sessionId]?.accountId || null
+        : null;
+      const connectedAccounts = checks
+        .filter(Boolean)
+        .map((tab) => describeNetsuiteAccountTab(tab, sender.tab?.id))
+        .filter(Boolean);
+      const uniqueAccounts = Array.from(
+        new Map(
+          connectedAccounts.map((account) => [account.accountId, account])
+        ).values()
+      );
+      const accounts = uniqueAccounts
+        .map((account) => ({
+          ...account,
+          current: selectedAccount
+            ? account.accountId === selectedAccount
+            : account.current
+        }))
+        .sort((a, b) => Number(b.current) - Number(a.current));
+
+      sendResponse({ ok: true, accounts });
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message, accounts: [] });
+    }
+  })();
+  return true;
+};
+
+const recoverDashboardPreviewSession = ({ message, sendResponse }) => {
+  (async () => {
+    try {
+      const liveSession = await getLiveDashboardPreviewSession();
+      if (!liveSession?.sessionId || !liveSession.session?.enablerTabId) {
+        throw new Error("Dashboard preview session could not be recovered.");
+      }
+      if (
+        message.sessionId &&
+        liveSession.sessionId !== message.sessionId
+      ) {
+        throw new Error("The open dashboard group belongs to another session.");
+      }
+      sendResponse({
+        ok: true,
+        sessionId: liveSession.sessionId,
+        session: liveSession.session
+      });
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message });
+    }
+  })();
+  return true;
+};
+
+const ensureDashboardPreviewOpen = async (message, sender) => {
+    let enablerTab = null;
+    let dashboardTab = null;
+    try {
+      // First and absolute rule: if the Chrome group already exists, open it.
+      // Nothing else in this flow is allowed to run before this check.
+      const existingGroup = await openExistingMagicDashboardGroup();
+      if (existingGroup) {
+        return { ok: true, reused: true };
+      }
+
+      const existingSession = await getLiveDashboardPreviewSession();
+      if (existingSession) {
+        await focusDashboardPreviewSession(existingSession);
+        return {
+          ok: true,
+          sessionId: existingSession.sessionId,
+          reused: true
+        };
+      }
+
+      const sourceTabId = Number(message.tabId || sender.tab?.id);
+      const sourceTab = await dashboardTabsGet(sourceTabId);
+      if (
+        !sourceTab?.id ||
+        !sourceTab.url?.includes("app.netsuite.com") ||
+        !sourceTab.windowId
+      ) {
+        throw new Error("The selected NetSuite account tab is no longer available.");
+      }
+
+      const sourceUrl = new URL(sourceTab.url);
+      const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const accountId = getAccountIdFromUrl(sourceUrl.href);
+
+      enablerTab = await dashboardTabsCreate({
+        url: buildDashboardEnablerUrl(sourceUrl, sessionId),
+        active: false,
+        windowId: sourceTab.windowId,
+        openerTabId: sourceTab.id
+      });
+      if (!enablerTab.id) throw new Error("Could not create the NetSuite enabler tab.");
+      await dashboardTabsUpdate(enablerTab.id, { autoDiscardable: false });
+      const enablerReady = waitForDashboardEnablerReady(sessionId, enablerTab.id);
+      await waitForTabComplete(enablerTab.id);
+      await enablerReady;
+      await decorateDashboardPreviewTab(
+        enablerTab.id,
+        DASHBOARD_ENABLER_TAB_TITLE
+      );
+
+      const dashboardUrl = new URL(
+        chrome.runtime.getURL("dist/vue-ui/index.html")
+      );
+      dashboardUrl.searchParams.set("magicDashboardPreview", sessionId);
+      dashboardUrl.searchParams.set("account", accountId);
+
+      dashboardTab = await dashboardTabsCreate({
+        url: dashboardUrl.href,
+        active: false,
+        windowId: sourceTab.windowId,
+        openerTabId: sourceTab.id
+      });
+      if (!dashboardTab.id) throw new Error("Could not create the dashboard tab.");
+      await waitForTabComplete(dashboardTab.id);
+      await decorateDashboardPreviewTab(dashboardTab.id, DASHBOARD_TAB_TITLE);
+
+      const groupId = await dashboardTabsGroup({
+        tabIds: [enablerTab.id, dashboardTab.id]
+      });
+      await dashboardTabGroupsUpdate(groupId, {
+          title: DASHBOARD_GROUP_TITLE,
+          color: "blue",
+          collapsed: false
+        })
+        .catch(() => undefined);
+
+      const sessions = await getDashboardPreviewSessions();
+      sessions[sessionId] = {
+        sessionId,
+        accountId,
+        accountDomain: sourceUrl.hostname,
+        sourceTabId: sourceTab.id,
+        enablerTabId: enablerTab.id,
+        dashboardTabId: dashboardTab.id,
+        groupId,
+        createdAt: Date.now()
+      };
+      await saveDashboardPreviewSessions(sessions);
+      await dashboardTabsUpdate(dashboardTab.id, { active: true });
+
+      return { ok: true, sessionId };
+    } catch (error) {
+      if (dashboardTab?.id) {
+        await dashboardTabsRemove(dashboardTab.id).catch(() => undefined);
+      }
+      if (enablerTab?.id) {
+        await dashboardTabsRemove(enablerTab.id).catch(() => undefined);
+      }
+      return { ok: false, error: error.message };
+    }
+};
+
+const openDashboardPreview = ({ message, sender, sendResponse }) => {
+  // Acquire the single-flight lock synchronously, before any asynchronous
+  // group lookup. Concurrent clicks/messages share this exact promise.
+  if (!dashboardPreviewOpenPromise) {
+    dashboardPreviewOpenPromise = ensureDashboardPreviewOpen(message, sender)
+      .finally(() => {
+        dashboardPreviewOpenPromise = null;
+      });
+  }
+
+  dashboardPreviewOpenPromise
+    .then(sendResponse)
+    .catch((error) => {
+      sendResponse({ ok: false, error: error.message });
+    });
+
+  return true;
+};
+
+const switchDashboardAccount = ({ message, sendResponse }) => {
+  (async () => {
+    try {
+      const liveSession = await getLiveDashboardPreviewSession();
+      const sessions = await getDashboardPreviewSessions();
+      const session =
+        liveSession?.sessionId === message.sessionId
+          ? liveSession.session
+          : sessions[message.sessionId];
+      if (!session) throw new Error("Dashboard preview session not found.");
+
+      const sourceTab = await dashboardTabsGet(Number(message.tabId));
+      if (!sourceTab?.id || !sourceTab.url?.includes("app.netsuite.com")) {
+        throw new Error("The selected NetSuite account tab is unavailable.");
+      }
+
+      const sourceUrl = new URL(sourceTab.url);
+      const accountId = getAccountIdFromUrl(sourceUrl.href);
+      if (accountId === session.accountId) {
+        sendResponse({ ok: true, accountId, accountDomain: sourceUrl.hostname });
+        return;
+      }
+
+      const enablerTab = await dashboardTabsGet(session.enablerTabId);
+      const enablerReady = waitForDashboardEnablerReady(
+        message.sessionId,
+        enablerTab.id
+      );
+      await dashboardTabsUpdate(enablerTab.id, {
+        url: buildDashboardEnablerUrl(sourceUrl, message.sessionId),
+        active: false,
+        autoDiscardable: false
+      });
+      await waitForTabComplete(enablerTab.id);
+      await enablerReady;
+      await decorateDashboardPreviewTab(
+        enablerTab.id,
+        DASHBOARD_ENABLER_TAB_TITLE
+      );
+
+      await dashboardTabsGroup({
+        groupId: session.groupId,
+        tabIds: [enablerTab.id, session.dashboardTabId]
+      });
+
+      sessions[message.sessionId] = {
+        ...session,
+        accountId,
+        accountDomain: sourceUrl.hostname,
+        sourceTabId: sourceTab.id,
+        enablerTabId: enablerTab.id
+      };
+      await saveDashboardPreviewSessions(sessions);
+      await dashboardTabGroupsUpdate(session.groupId, {
+          title: DASHBOARD_GROUP_TITLE,
+          color: "blue",
+          collapsed: false
+        })
+        .catch(() => undefined);
+      await dashboardTabsUpdate(session.dashboardTabId, { active: true })
+        .catch(() => undefined);
+
+      sendResponse({ ok: true, accountId, accountDomain: sourceUrl.hostname });
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message });
+    }
+  })();
+  return true;
 };
 
 const startElementScreenshotSelection = ({ sendResponse } = {}) => {
@@ -563,12 +1288,25 @@ const notifyTabChange = (reason, tab) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url) {
     notifyTabChange("url-loaded", tab);
+    if (tab.url.includes("magicDashboardEnabler=")) {
+      decorateDashboardPreviewTab(
+        tabId,
+        DASHBOARD_ENABLER_TAB_TITLE
+      ).catch(() => undefined);
+    } else if (
+      tab.url.startsWith(chrome.runtime.getURL("dist/vue-ui/index.html")) &&
+      tab.url.includes("magicDashboardPreview=")
+    ) {
+      decorateDashboardPreviewTab(tabId, DASHBOARD_TAB_TITLE).catch(
+        () => undefined
+      );
+    }
   }
 });
 
 // Tab activated → wait until loaded
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await dashboardTabsGet(tabId);
   if (tab.status === "complete") {
     notifyTabChange("tab-activated", tab);
   }
@@ -878,7 +1616,7 @@ async function validateDedicatedTab() {
   if (!mcpDedicatedTabId) return null;
 
   try {
-    const tab = await chrome.tabs.get(mcpDedicatedTabId);
+    const tab = await dashboardTabsGet(mcpDedicatedTabId);
     if (!tab || !tab.url?.includes("app.netsuite.com")) {
       // Tab was closed or navigated away
       mcpDedicatedTabId = null;
@@ -952,6 +1690,23 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     mcpDedicatedTabId = null;
     mcpDedicatedTabAccountId = null;
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  (async () => {
+    const sessions = await getDashboardPreviewSessions();
+    let changed = false;
+    for (const [sessionId, session] of Object.entries(sessions)) {
+      if (
+        session.dashboardTabId === tabId ||
+        session.enablerTabId === tabId
+      ) {
+        delete sessions[sessionId];
+        changed = true;
+      }
+    }
+    if (changed) await saveDashboardPreviewSessions(sessions);
+  })().catch(() => undefined);
 });
 
 // Listen for account preference changes to reset the dedicated tab
@@ -4063,8 +4818,8 @@ function waitForTabLoaded(tabId, timeoutMs = 20000) {
 
 async function focusSuiteletStreamTab(tab) {
   if (!tab?.id || !tab.windowId) throw new Error("Suitelet stream tab is unavailable.");
-  await chrome.windows.update(tab.windowId, { focused: true });
-  await chrome.tabs.update(tab.id, { active: true });
+  await dashboardWindowsUpdate(tab.windowId, { focused: true });
+  await dashboardTabsUpdate(tab.id, { active: true });
 }
 
 function getTabOrigin(url) {
@@ -4177,7 +4932,7 @@ async function handleSuiteletStreamStart(args) {
   let tab;
 
   if (requestedUrl) {
-    tab = await chrome.tabs.create({ url: requestedUrl, active: openActive });
+    tab = await dashboardTabsCreate({ url: requestedUrl, active: openActive });
     await waitForTabLoaded(tab.id).catch(() => null);
   } else {
     tab = await getPreferredNetsuiteTab();
@@ -4188,7 +4943,7 @@ async function handleSuiteletStreamStart(args) {
     throw new Error("Could not start Suitelet stream: no tab was available.");
   }
 
-  const freshTab = await chrome.tabs.get(tab.id);
+  const freshTab = await dashboardTabsGet(tab.id);
   if (previousTabId && previousTabId !== tab.id && suiteletDebuggerAttached) {
     await chrome.debugger.detach({ tabId: previousTabId }).catch(() => null);
   }
@@ -5083,7 +5838,7 @@ async function handleSuiteletStreamFrame() {
     throw new Error("No Suitelet stream session is active. Start one from the MCP app first.");
   }
 
-  const tab = await chrome.tabs.get(suiteletStreamSession.tabId);
+  const tab = await dashboardTabsGet(suiteletStreamSession.tabId);
   const viewport = await getSuiteletViewport(suiteletStreamSession.tabId);
   suiteletStreamSession.url = tab.url || suiteletStreamSession.url;
   const screenshot = await sendSuiteletDebuggerCommand(
@@ -5315,9 +6070,11 @@ async function focusSuiteletControlTab() {
   const tabId = suiteletStreamSession?.tabId;
   if (!tabId) return;
   try {
-    await chrome.tabs.update(tabId, { active: true });
-    const tab = await chrome.tabs.get(tabId);
-    if (tab?.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+    await dashboardTabsUpdate(tabId, { active: true });
+    const tab = await dashboardTabsGet(tabId);
+    if (tab?.windowId) {
+      await dashboardWindowsUpdate(tab.windowId, { focused: true });
+    }
   } catch (e) { /* tab may have closed; ignore */ }
 }
 
@@ -5345,7 +6102,7 @@ async function handleSuiteletControlOpen(args) {
     screenshotData = shot?.data || "";
   } catch (e) { /* screenshot is best-effort */ }
 
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const tab = await dashboardTabsGet(tabId).catch(() => null);
   const content = [{
     type: "text",
     text: JSON.stringify({
@@ -5387,7 +6144,7 @@ async function handleSuiteletScreenshot() {
   const tabId = requireSuiteletControlTab();
   await ensureSuiteletDebugger(tabId);
   const data = await captureSuiteletScreenshotData(tabId);
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const tab = await dashboardTabsGet(tabId).catch(() => null);
   const content = [{
     type: "text",
     text: JSON.stringify({ ok: true, url: tab?.url || "", title: tab?.title || "" }, null, 2)
@@ -5993,7 +6750,7 @@ async function getPreferredNetsuiteTab() {
   }
 
   // ── Step 2: Find any existing connected tab for this account ──
-  const allTabs = await chrome.tabs.query({});
+  const allTabs = await dashboardTabsQuery({});
   const netsuiteTabs = allTabs.filter(
     (tab) => tab.url && tab.url.includes("app.netsuite.com") && tab.id
   );

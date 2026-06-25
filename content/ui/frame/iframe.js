@@ -25,7 +25,9 @@ export const injectUI = (route = "") => {
   if (iframe) return;
 
   const baseUrl = chrome.runtime.getURL("dist/vue-ui/index.html");
-  const src = route ? `${baseUrl}#${route}` : baseUrl;
+  const src = route
+    ? `${baseUrl}?initialRoute=${encodeURIComponent(route)}`
+    : baseUrl;
 
   iframe = document.createElement("iframe");
   iframe.allow = "clipboard-read; clipboard-write";
