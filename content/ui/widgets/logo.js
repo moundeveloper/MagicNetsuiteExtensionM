@@ -61,7 +61,6 @@ const addDashboardButton = (menuItemSpan) => {
     flex: "0 0 auto",
     padding: "0 6px",
     position: "relative",
-    zIndex: "200000002",
     pointerEvents: "auto"
   });
 
