@@ -1372,10 +1372,10 @@ window.deleteNetsuiteScript = async (
     defaultFunction = "onRequest"
   }
 ) => {
-  const { accountId, csrfToken } = getNetsiteParams();
+  const { accountId, domain, csrfToken } = getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
 
-  const url = `https://${accountId}.app.netsuite.com/app/common/scripting/script.nl`;
+  const url = `https://${domain}/app/common/scripting/script.nl`;
 
   const body = {
     delete: "Delete",

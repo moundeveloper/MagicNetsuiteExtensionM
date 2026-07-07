@@ -11,10 +11,36 @@ window.getRootFolders = async ({ query }) => {
   return rootFolders;
 };
 
-window.createFolder = async ({ runtime }, { folderName, parentFolderId }) => {
-  const { csrfToken, accountId } = getNetsiteParams();
+window.createFolder = async ({ runtime, record }, { folderName, parentFolderId }) => {
+  if (record?.create) {
+    try {
+      const folderRec = record.create({
+        type: "folder",
+        isDynamic: true
+      });
+      folderRec.setValue({ fieldId: "name", value: folderName });
+      folderRec.setValue({
+        fieldId: "parent",
+        value: parentFolderId === undefined || parentFolderId === null
+          ? -15
+          : Number(parentFolderId)
+      });
+      const folderId = folderRec.save({
+        enableSourcing: true,
+        ignoreMandatoryFields: true
+      });
+      return { folderId };
+    } catch (recordError) {
+      console.warn(
+        "Folder creation via N/record failed; falling back to form POST:",
+        recordError
+      );
+    }
+  }
+
+  const { csrfToken, accountId, domain } = getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
-  const baseUrl = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl`;
+  const baseUrl = `https://${domain}/app/common/media/mediaitemfolder.nl`;
 
   const timestamp = Date.now();
   const cmid = `${timestamp}_${Math.floor(Math.random() * 100000)}`;
@@ -41,7 +67,7 @@ window.createFolder = async ({ runtime }, { folderName, parentFolderId }) => {
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1"
       },
-      referrer: `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl?parent=${parentFolderId}`,
+      referrer: `https://${domain}/app/common/media/mediaitemfolder.nl?parent=${parentFolderId}`,
       body: body,
       credentials: "include",
       mode: "cors"
@@ -316,9 +342,9 @@ function extractFileIdFromHtml(html, fileName) {
 }
 
 window.deleteNetsuiteFile = async (N, { fileId, folderId }) => {
-  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { csrfToken, accountId, domain } = window.getNetsiteParams();
 
-  const url = `https://${accountId}.app.netsuite.com/app/common/media/mediaitem.nl`;
+  const url = `https://${domain}/app/common/media/mediaitem.nl`;
 
   const fields = {
     delete_media: "Delete",
@@ -500,9 +526,9 @@ window.editFolder = async (
   { runtime },
   { folderId, newName, parentFolderId }
 ) => {
-  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { csrfToken, accountId, domain } = window.getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
-  const baseUrl = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl`;
+  const baseUrl = `https://${domain}/app/common/media/mediaitemfolder.nl`;
   const timestamp = Date.now();
 
   const body =
@@ -538,7 +564,7 @@ window.editFolder = async (
       "sec-fetch-user": "?1",
       "upgrade-insecure-requests": "1"
     },
-    referrer: `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolder.nl?id=${folderId}&e=T`,
+    referrer: `https://${domain}/app/common/media/mediaitemfolder.nl?id=${folderId}&e=T`,
     body,
     credentials: "include",
     mode: "cors"
@@ -562,7 +588,7 @@ window.editMediaItem = async (
   { runtime },
   { fileId, newName, folderId, filetype = "", filesize = 0 }
 ) => {
-  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { csrfToken, accountId, domain } = window.getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
   const timestamp = Date.now();
 
@@ -651,7 +677,7 @@ window.editMediaItem = async (
 
   // Do NOT set Content-Type header — the browser sets it automatically with the correct boundary
   const response = await fetch(
-    `https://${accountId}.app.netsuite.com/app/common/media/mediaitem.nl`,
+    `https://${domain}/app/common/media/mediaitem.nl`,
     {
       method: "POST",
       headers: {
@@ -665,7 +691,7 @@ window.editMediaItem = async (
         "sec-fetch-user": "?1",
         "upgrade-insecure-requests": "1"
       },
-      referrer: `https://${accountId}.app.netsuite.com/app/common/media/mediaitem.nl?id=${fileId}&e=T`,
+      referrer: `https://${domain}/app/common/media/mediaitem.nl?id=${fileId}&e=T`,
       body: fd,
       credentials: "include",
       mode: "cors"
@@ -722,9 +748,9 @@ window.moveItems = async (
   N,
   { srcFolderId, dstFolderId, fileIds = [], folderIds = [] }
 ) => {
-  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { csrfToken, accountId, domain } = window.getNetsiteParams();
   // URL must repeat the folder param and use overwrite=false — matches the working reference request
-  const url = `https://${accountId}.app.netsuite.com/app/common/media/mediaitemfolders.nl?folder=${srcFolderId}&_grpMove=T&folder=${srcFolderId}&overwrite=true&newfolder=${dstFolderId}`;
+  const url = `https://${domain}/app/common/media/mediaitemfolders.nl?folder=${srcFolderId}&_grpMove=T&folder=${srcFolderId}&overwrite=true&newfolder=${dstFolderId}`;
 
   // Body: _csrf first, then folders, then files — matching reference order.
   // Folders → sa<id>fldT=T
@@ -752,7 +778,7 @@ window.moveItems = async (
       "sec-gpc": "1",
       "upgrade-insecure-requests": "1"
     },
-    referrer: `https://${accountId}.app.netsuite.com/app/common/media/updatemediaitems.nl?action=Move&folder=${srcFolderId}`,
+    referrer: `https://${domain}/app/common/media/updatemediaitems.nl?action=Move&folder=${srcFolderId}`,
     body: body.toString(),
     credentials: "include",
     mode: "cors"
@@ -778,10 +804,10 @@ window.updateNetsuiteFileContent = async (
     syntaxHighlighting = "T"
   }
 ) => {
-  const { csrfToken, accountId } = window.getNetsiteParams();
+  const { csrfToken, accountId, domain } = window.getNetsiteParams();
   const { id, role } = runtime.getCurrentUser();
 
-  const url = `https://${accountId}.app.netsuite.com/app/common/record/edittextmediaitem.nl?l=T&l=T`;
+  const url = `https://${domain}/app/common/record/edittextmediaitem.nl?l=T&l=T`;
 
   const body = {
     submitter: "Save",
@@ -842,7 +868,7 @@ window.updateNetsuiteFileContent = async (
       "sec-gpc": "1",
       "upgrade-insecure-requests": "1"
     },
-    referrer: `https://${accountId}.app.netsuite.com/app/common/record/edittextmediaitem.nl?id=${fileId}&e=T&l=T&target=${target}&syntaxHighlighting=${syntaxHighlighting}`,
+    referrer: `https://${domain}/app/common/record/edittextmediaitem.nl?id=${fileId}&e=T&l=T&target=${target}&syntaxHighlighting=${syntaxHighlighting}`,
     body: new URLSearchParams(body).toString()
   });
 

@@ -423,6 +423,68 @@ export function createServer() {
         await connectNativeBridge();
         return toolResult({ connected: true, pipe: BRIDGE_PIPE_PATH }, "Magic NetSuite bridge is connected.");
     });
+    server.registerTool("magic_netsuite_save_skill", {
+        title: "Save Magic NetSuite Skill",
+        description: "Save or update a reusable Markdown skill in the Magic NetSuite extension skill library. Use this when the user asks to create a skill for Magic NetSuite; it will appear in the Vue Skills view and local harnesses.",
+        inputSchema: {
+            id: z.number().optional(),
+            name: z.string().describe("Short skill name."),
+            description: z.string().optional().describe("One-sentence search description."),
+            tags: z.union([z.string(), z.array(z.string())]).optional().describe("Comma-separated tags or tag array."),
+            content: z.string().optional().describe("Markdown skill content."),
+            markdown: z.string().optional().describe("Alias for content."),
+            domain: z.enum(["global", "sql"]).optional().describe("Skill scope. Defaults to global."),
+            enabled: z.boolean().optional().describe("Whether the skill is enabled. Defaults to true."),
+            upsertByName: z.boolean().optional().describe("Update a same-name skill if found. Defaults to true."),
+        },
+    }, async (args) => {
+        const data = parseToolJson(await callExtensionTool("magic_netsuite_save_skill", args));
+        return toolResult(isRecord(data) ? data : { value: data }, "Skill saved to Magic NetSuite.");
+    });
+    server.registerTool("magic_netsuite_list_skills", {
+        title: "List Magic NetSuite Skills",
+        description: "List skill metadata from the Magic NetSuite extension skill library.",
+        inputSchema: {
+            includeDisabled: z.boolean().optional().describe("Include disabled skills. Defaults to true."),
+        },
+    }, async (args) => {
+        const data = parseToolJson(await callExtensionTool("magic_netsuite_list_skills", args));
+        return toolResult(isRecord(data) ? data : { value: data }, "Skills listed.");
+    });
+    server.registerTool("magic_netsuite_search_skills", {
+        title: "Search Magic NetSuite Skills",
+        description: "Search the local Magic NetSuite skill library by name, description, and tags. Use this before external documentation for NetSuite, SuiteScript, FreeMarker, SuiteQL, UI workflow, or project-specific knowledge questions. Returns metadata only; load relevant results with magic_netsuite_load_skill.",
+        inputSchema: {
+            query: z.string().optional(),
+            includeDisabled: z.boolean().optional(),
+        },
+    }, async (args) => {
+        const data = parseToolJson(await callExtensionTool("magic_netsuite_search_skills", args));
+        return toolResult(isRecord(data) ? data : { value: data }, "Skills searched.");
+    });
+    server.registerTool("magic_netsuite_load_skill", {
+        title: "Load Magic NetSuite Skill",
+        description: "Load one Magic NetSuite skill, including Markdown content, by ID.",
+        inputSchema: {
+            id: z.number().optional(),
+            skillId: z.number().optional(),
+        },
+    }, async (args) => {
+        const data = parseToolJson(await callExtensionTool("magic_netsuite_load_skill", args));
+        return toolResult(isRecord(data) ? data : { value: data }, "Skill loaded.");
+    });
+    server.registerTool("magic_netsuite_set_skill_enabled", {
+        title: "Enable or Disable Magic NetSuite Skill",
+        description: "Enable or disable a Magic NetSuite skill by ID.",
+        inputSchema: {
+            id: z.number().optional(),
+            skillId: z.number().optional(),
+            enabled: z.boolean(),
+        },
+    }, async (args) => {
+        const data = parseToolJson(await callExtensionTool("magic_netsuite_set_skill_enabled", args));
+        return toolResult(isRecord(data) ? data : { value: data }, "Skill enabled state updated.");
+    });
     server.registerTool("magic_netsuite_suitelet_stream_start", {
         title: "Start Suitelet Stream",
         description: "INTERNAL viewer transport for the MCP App UI — agents should NOT use this. To open and drive a Suitelet, use magic_netsuite_suitelet_control_open instead.",
