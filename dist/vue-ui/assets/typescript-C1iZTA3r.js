@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-dZW-577x.js";export{t as conf,e as language};

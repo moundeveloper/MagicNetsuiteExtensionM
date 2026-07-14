@@ -334,7 +334,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     SWITCH_DASHBOARD_ACCOUNT: switchDashboardAccount,
     DASHBOARD_ENABLER_READY: dashboardEnablerReady,
     START_ELEMENT_SCREENSHOT_SELECTION: startElementScreenshotSelection,
-    CAPTURE_ELEMENT_SCREENSHOT: captureElementScreenshot
+    CAPTURE_ELEMENT_SCREENSHOT: captureElementScreenshot,
+    CLAUDE_CLI_START: handleClaudeCliStart,
+    CLAUDE_CLI_CANCEL: handleClaudeCliCancel,
+    CLAUDE_CLI_GET_STATE: handleClaudeCliGetState,
+    CLAUDE_CLI_CLEAR: handleClaudeCliClear
   };
 
   const messageHandler = messageMap[message.type];
@@ -1560,6 +1564,243 @@ async function handleMagicSetSkillEnabled(args) {
   return { content: [{ type: "text", text: JSON.stringify({ id, enabled }, null, 2) }] };
 }
 
+const CUSTOM_TOOLS_STORAGE_KEY = "magic_netsuite_custom_tools_v1";
+const CUSTOM_TOOL_BOTH_MODULES = [
+  "record", "search", "query", "runtime", "log", "url", "format", "email",
+  "https", "http", "xml", "currency", "transaction"
+];
+const CUSTOM_TOOL_CLIENT_MODULES = ["currentRecord", "dialog", "message"];
+const CUSTOM_TOOL_SERVER_MODULES = ["file", "render", "task", "workflow", "encode", "error", "redirect"];
+const CUSTOM_TOOL_ALL_MODULES = new Set([
+  ...CUSTOM_TOOL_BOTH_MODULES, ...CUSTOM_TOOL_CLIENT_MODULES, ...CUSTOM_TOOL_SERVER_MODULES
+]);
+
+function customToolDomainModules(domain) {
+  if (domain === "client") return new Set([...CUSTOM_TOOL_BOTH_MODULES, ...CUSTOM_TOOL_CLIENT_MODULES]);
+  if (domain === "server") return new Set([...CUSTOM_TOOL_BOTH_MODULES, ...CUSTOM_TOOL_SERVER_MODULES]);
+  return new Set(CUSTOM_TOOL_BOTH_MODULES);
+}
+
+function normalizeCustomTool(tool) {
+  const hasServerOnlyModule = (tool?.modules || []).some((module) => CUSTOM_TOOL_SERVER_MODULES.includes(module));
+  return {
+    ...tool,
+    domain: tool?.domain || (hasServerOnlyModule ? "server" : "both"),
+    testInput: tool?.testInput && typeof tool.testInput === "object" && !Array.isArray(tool.testInput) ? tool.testInput : {}
+  };
+}
+
+async function getStoredCustomTools() {
+  const stored = await chrome.storage.local.get(CUSTOM_TOOLS_STORAGE_KEY);
+  const tools = stored[CUSTOM_TOOLS_STORAGE_KEY];
+  return Array.isArray(tools) ? tools.map(normalizeCustomTool) : [];
+}
+
+async function saveStoredCustomTools(tools) {
+  await chrome.storage.local.set({ [CUSTOM_TOOLS_STORAGE_KEY]: tools });
+}
+
+async function saveStoredCustomToolTestState(id, testInput, result, domain) {
+  const tools = await getStoredCustomTools();
+  await saveStoredCustomTools(tools.map((tool) => tool.id === id ? {
+    ...tool,
+    testInput,
+    lastTestResult: result,
+    lastTestedAt: new Date().toISOString(),
+    lastTestDomain: domain
+  } : tool));
+}
+
+function validateCustomToolDefinition(tool, existing, currentId) {
+  const errors = [];
+  if (!/^[a-z][a-z0-9_]{2,63}$/.test(tool.name || "")) errors.push("Tool name must be 3-64 lowercase letters, numbers, or underscores and start with a letter.");
+  if (!String(tool.displayName || "").trim()) errors.push("displayName is required.");
+  if (!String(tool.description || "").trim()) errors.push("description is required.");
+  if (!["client", "server", "both"].includes(tool.domain)) errors.push("domain must be client, server, or both.");
+  if (!tool.inputSchema || typeof tool.inputSchema !== "object" || Array.isArray(tool.inputSchema) || tool.inputSchema.type !== "object") errors.push('inputSchema must be an object schema with type "object".');
+  if (!String(tool.code || "").trim()) errors.push("code is required.");
+  if (existing.some((candidate) => candidate.name === tool.name && candidate.id !== currentId)) errors.push(`A custom tool named "${tool.name}" already exists.`);
+  const allowed = customToolDomainModules(tool.domain);
+  for (const module of tool.modules || []) {
+    if (!CUSTOM_TOOL_ALL_MODULES.has(module) || !allowed.has(module)) errors.push(`Module ${module} is not available in the ${tool.domain} domain.`);
+  }
+  if (errors.length) throw new Error(errors.join("\n"));
+}
+
+async function handleMagicCreateCustomTool(args) {
+  const existing = await getStoredCustomTools();
+  const now = new Date().toISOString();
+  const tool = {
+    id: globalThis.crypto?.randomUUID?.() || `custom_tool_${Date.now()}`,
+    name: String(args?.name || "").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64),
+    displayName: String(args?.displayName || "").trim(),
+    description: String(args?.description || "").trim(),
+    tags: Array.isArray(args?.tags) ? [...new Set(args.tags.map((tag) => String(tag).trim().toLowerCase()).filter(Boolean))] : [],
+    domain: String(args?.domain || "both"),
+    modules: Array.isArray(args?.modules) ? [...new Set(args.modules.map(String))] : [],
+    inputSchema: args?.inputSchema,
+    testInput: args?.testInput && typeof args.testInput === "object" && !Array.isArray(args.testInput) ? args.testInput : {},
+    code: String(args?.code || ""),
+    status: "draft",
+    risk: args?.risk === "write" ? "write" : "read",
+    enabled: true,
+    createdAt: now,
+    updatedAt: now
+  };
+  const duplicate = existing.find((candidate) => candidate.name === tool.name);
+  if (duplicate) throw new Error(`Custom tool "${tool.name}" already exists. Use magic_netsuite_update_custom_tool to edit it.`);
+  validateCustomToolDefinition(tool, existing);
+  await saveStoredCustomTools([...existing, tool]);
+  return asMcpTextResult({ created: true, status: "draft", tool });
+}
+
+async function handleMagicUpdateCustomTool(args) {
+  const tools = await getStoredCustomTools();
+  const toolName = String(args?.toolName || "").trim().toLowerCase();
+  if (!toolName) throw new Error("toolName is required.");
+  const existing = tools.find((candidate) => String(candidate.name || "").toLowerCase() === toolName);
+  if (!existing) throw new Error(`Custom tool "${toolName}" was not found.`);
+  const has = (field) => Object.prototype.hasOwnProperty.call(args || {}, field);
+  const updated = {
+    ...existing,
+    name: has("name") ? String(args.name || "").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) : existing.name,
+    displayName: has("displayName") ? String(args.displayName || "").trim() : existing.displayName,
+    description: has("description") ? String(args.description || "").trim() : existing.description,
+    tags: has("tags") ? (Array.isArray(args.tags) ? [...new Set(args.tags.map((tag) => String(tag).trim().toLowerCase()).filter(Boolean))] : []) : existing.tags,
+    domain: has("domain") ? String(args.domain) : existing.domain,
+    modules: has("modules") ? (Array.isArray(args.modules) ? [...new Set(args.modules.map(String))] : []) : existing.modules,
+    inputSchema: has("inputSchema") ? args.inputSchema : existing.inputSchema,
+    testInput: has("testInput") ? (args.testInput && typeof args.testInput === "object" && !Array.isArray(args.testInput) ? args.testInput : {}) : existing.testInput,
+    code: has("code") ? String(args.code || "") : existing.code,
+    risk: has("risk") ? (args.risk === "write" ? "write" : "read") : existing.risk,
+    enabled: has("enabled") ? Boolean(args.enabled) : existing.enabled,
+    status: "draft",
+    updatedAt: new Date().toISOString()
+  };
+  validateCustomToolDefinition(updated, tools, existing.id);
+  await saveStoredCustomTools(tools.map((tool) => tool.id === existing.id ? updated : tool));
+  return asMcpTextResult({ updated: true, status: "draft", tool: updated });
+}
+
+async function handleMagicSearchCustomTools(args) {
+  const terms = String(args?.query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const results = (await getStoredCustomTools())
+    .filter((tool) => tool?.enabled !== false && tool?.status === "active")
+    .map((tool) => {
+      const nameText = `${tool.name || ""} ${tool.displayName || ""}`.toLowerCase();
+      const metadata = `${tool.description || ""} ${(tool.tags || []).join(" ")} ${(tool.modules || []).join(" ")}`.toLowerCase();
+      const score = terms.length === 0 ? 1 : terms.reduce(
+        (sum, term) => sum + (nameText.includes(term) ? 8 : 0) + (metadata.includes(term) ? 3 : 0),
+        0
+      );
+      return { tool, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score || String(b.tool.updatedAt || "").localeCompare(String(a.tool.updatedAt || "")))
+    .map(({ tool, score }) => ({
+      id: tool.id,
+      name: tool.name,
+      displayName: tool.displayName,
+      description: tool.description,
+      tags: tool.tags || [],
+      modules: tool.modules || [],
+      domain: tool.domain,
+      inputSchema: tool.inputSchema || { type: "object", properties: {} },
+      risk: tool.risk || "write",
+      score
+    }));
+  return { content: [{ type: "text", text: JSON.stringify({ matched: results.length, results }, null, 2) }] };
+}
+
+async function executeStoredCustomTool(tool, args) {
+  const toolName = String(args?.toolName || args?.name || "").trim().toLowerCase();
+  if (!toolName) throw new Error("toolName is required.");
+  const input = args?.input && typeof args.input === "object" && !Array.isArray(args.input)
+    ? args.input
+    : {};
+  const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
+  for (const field of required) {
+    if (input[field] === undefined || input[field] === null || input[field] === "") {
+      throw new Error(`Missing required input: ${field}`);
+    }
+  }
+  const properties = tool.inputSchema?.properties && typeof tool.inputSchema.properties === "object"
+    ? tool.inputSchema.properties
+    : {};
+  for (const [field, value] of Object.entries(input)) {
+    const expectedType = properties[field]?.type;
+    if (!expectedType || value === null || value === undefined) continue;
+    const valid = expectedType === "array"
+      ? Array.isArray(value)
+      : expectedType === "object"
+        ? typeof value === "object" && !Array.isArray(value)
+        : expectedType === "integer"
+          ? Number.isInteger(value)
+          : typeof value === expectedType;
+    if (!valid) throw new Error(`Invalid input type for ${field}: expected ${expectedType}.`);
+  }
+  const requestedDomain = args?.executionDomain;
+  if (requestedDomain && !["client", "server"].includes(requestedDomain)) throw new Error("executionDomain must be client or server.");
+  const executionDomain = tool.domain === "both" ? (requestedDomain || "client") : tool.domain;
+  if (requestedDomain && tool.domain !== "both" && requestedDomain !== tool.domain) throw new Error(`This tool is restricted to ${tool.domain} execution.`);
+  const allowedModules = customToolDomainModules(tool.domain);
+  const modules = Array.isArray(tool.modules)
+    ? tool.modules.filter((module) => allowedModules.has(module))
+    : [];
+  const inputJson = JSON.stringify(JSON.stringify(input));
+  const metadataJson = JSON.stringify(JSON.stringify({
+    toolName: tool.name,
+    displayName: tool.displayName,
+    modules, domain: executionDomain,
+    executedAt: new Date().toISOString()
+  }));
+  const moduleObject = modules.map((module) => `${module}: ${module}`).join(", ");
+  const invocation = executionDomain === "server"
+    ? `(function(input, context) {\n${String(tool.code || "")}\n})(__customToolInput, __customToolContext)`
+    : `(async function(input, context) {\n${String(tool.code || "")}\n})(__customToolInput, __customToolContext)`;
+  const code = [
+    `const __customToolInput = JSON.parse(${inputJson});`,
+    `const __customToolContext = Object.freeze({ ...JSON.parse(${metadataJson}), modules: Object.freeze({ ${moduleObject} }) });`,
+    `return ${invocation};`
+  ].join("\n");
+  const execution = await callNetsuiteRoute(
+    executionDomain === "server" ? "RUN_QUICK_SCRIPT_SERVER" : "RUN_QUICK_SCRIPT",
+    { code },
+    `Custom tool "${tool.name}" failed.`
+  );
+  if (execution?.error) throw new Error(String(execution.error));
+  return asMcpTextResult({
+    tool: tool.name, executionDomain,
+    result: execution?.result ?? execution,
+    logs: execution?.logs ?? []
+  });
+}
+
+async function handleMagicCallCustomTool(args) {
+  const toolName = String(args?.toolName || args?.name || "").trim().toLowerCase();
+  if (!toolName) throw new Error("toolName is required.");
+  const tool = (await getStoredCustomTools()).find((candidate) => String(candidate?.name || "").toLowerCase() === toolName);
+  if (!tool || tool.enabled === false || tool.status !== "active") throw new Error(`Active custom tool "${toolName}" was not found.`);
+  return executeStoredCustomTool(tool, args);
+}
+
+async function handleMagicTestCustomTool(args) {
+  const toolName = String(args?.toolName || args?.name || "").trim().toLowerCase();
+  if (!toolName) throw new Error("toolName is required.");
+  const tool = (await getStoredCustomTools()).find((candidate) => String(candidate?.name || "").toLowerCase() === toolName);
+  if (!tool) throw new Error(`Custom tool "${toolName}" was not found.`);
+  const testInput = args?.input && typeof args.input === "object" && !Array.isArray(args.input) ? args.input : tool.testInput;
+  const domain = tool.domain === "both" ? (args?.executionDomain || "client") : tool.domain;
+  try {
+    const result = await executeStoredCustomTool(tool, { ...args, input: testInput, executionDomain: domain });
+    await saveStoredCustomToolTestState(tool.id, testInput, result, domain);
+    return result;
+  } catch (error) {
+    await saveStoredCustomToolTestState(tool.id, testInput, { error: error?.message || String(error) }, domain);
+    throw error;
+  }
+}
+
 const MCP_SERVER_SIDE_TOOL_NAMES = new Set([
   "suiteql_search_tables",
   "suiteql_get_table_fields",
@@ -1598,6 +1839,7 @@ const MCP_SERVER_SIDE_TOOL_NAMES = new Set([
   "netsuite_sdf_import_object",
   "netsuite_create_script_field",
   "netsuite_update_script_field",
+  "netsuite_update_metadata_record",
   "netsuite_run_quick_script",
   "netsuite_submit_task",
   "netsuite_check_task_status",
@@ -1620,7 +1862,7 @@ function queryNativeHostDirect(message) {
     const timer = setTimeout(() => {
       mcpDirectQueryPending.delete(requestId);
       reject(new Error("Native host query timeout"));
-    }, 5000);
+    }, 10000);
 
     const pending = {
       resolve,
@@ -1638,6 +1880,176 @@ function queryNativeHostDirect(message) {
     }
   });
 }
+
+// ── Claude CLI runs ──
+// The native host starts the locally installed `claude -p` process. The
+// background worker only retains a compact, restorable view of its JSONL stream.
+const CLAUDE_CLI_RUNS_KEY = "magic_netsuite_claude_cli_runs";
+let claudeCliRuns = null;
+let claudeCliPersistTimer = null;
+
+async function ensureClaudeCliRuns() {
+  if (claudeCliRuns) return claudeCliRuns;
+  const stored = await chrome.storage.session.get([CLAUDE_CLI_RUNS_KEY]);
+  claudeCliRuns = stored?.[CLAUDE_CLI_RUNS_KEY] || {};
+  return claudeCliRuns;
+}
+
+function persistClaudeCliRunsSoon() {
+  clearTimeout(claudeCliPersistTimer);
+  claudeCliPersistTimer = setTimeout(() => {
+    chrome.storage.session.set({ [CLAUDE_CLI_RUNS_KEY]: claudeCliRuns || {} }).catch(() => {});
+  }, 200);
+}
+
+function claudeTextDelta(event) {
+  if (event?.type !== "stream_event") return "";
+  const streamEvent = event.event;
+  if (streamEvent?.type === "content_block_delta" && streamEvent?.delta?.type === "text_delta") {
+    return String(streamEvent.delta.text || "");
+  }
+  return "";
+}
+
+function compactClaudeCliEvent(event) {
+  try {
+    const raw = JSON.stringify(event);
+    if (raw.length <= 60000) return event;
+    return {
+      type: event?.type || "large_event",
+      subtype: event?.subtype,
+      truncated: true,
+      preview: raw.slice(0, 60000),
+      message: "Event was truncated in restored history; the live event was still delivered to the open view."
+    };
+  } catch {
+    return { type: event?.type || "invalid_event", message: "Event could not be saved in run history." };
+  }
+}
+
+async function recordClaudeCliEvent(message) {
+  const runs = await ensureClaudeCliRuns();
+  const run = runs[message.runId];
+  if (!run) return;
+  const event = message.event || {};
+  const delta = claudeTextDelta(event);
+
+  if (delta) {
+    run.liveText = `${run.liveText || ""}${delta}`.slice(-500000);
+  } else if (event.type !== "stream_event") {
+    run.events = [...(run.events || []), compactClaudeCliEvent(event)].slice(-300);
+  }
+
+  if (event.type === "process_started") {
+    Object.assign(run, event, { status: "running" });
+  } else if (event.type === "system" && event.subtype === "init") {
+    run.sessionId = event.session_id || run.sessionId;
+    run.model = event.model || run.model;
+  } else if (event.type === "result") {
+    run.result = event.result || "";
+    run.sessionId = event.session_id || run.sessionId;
+    run.costUsd = event.total_cost_usd;
+    run.durationMs = event.duration_ms;
+    run.turns = event.num_turns;
+    run.status = event.is_error ? "failed" : "completed";
+  } else if (event.type === "process_error") {
+    run.error = event.message || "Claude CLI failed to start.";
+    run.status = "failed";
+  } else if (event.type === "process_exit") {
+    run.finishedAt = event.finishedAt || new Date().toISOString();
+    run.exitCode = event.exitCode;
+    run.status = event.cancelled ? "cancelled" : event.exitCode === 0 ? "completed" : "failed";
+  }
+  run.updatedAt = new Date().toISOString();
+  persistClaudeCliRunsSoon();
+}
+
+async function waitForNativeHost() {
+  await mcpConnect();
+  for (let attempt = 0; attempt < 20 && !mcpNativePort; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!mcpNativePort) throw new Error(mcpNativeLastError || "Native host is not connected.");
+}
+
+const handleClaudeCliStart = ({ message, sendResponse }) => {
+  (async () => {
+    try {
+      await waitForNativeHost();
+      const runs = await ensureClaudeCliRuns();
+      const runId = `claude-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      runs[runId] = {
+        runId,
+        prompt: String(message.prompt || ""),
+        cwd: String(message.cwd || ""),
+        model: message.model || "default",
+        permissionMode: message.permissionMode || "plan",
+        maxTurns: Number(message.maxTurns) || 12,
+        status: "starting",
+        startedAt: new Date().toISOString(),
+        liveText: "",
+        events: []
+      };
+      await chrome.storage.session.set({ [CLAUDE_CLI_RUNS_KEY]: runs });
+      const response = await queryNativeHostDirect({ ...message, type: "CLAUDE_CLI_START", runId });
+      if (response.success === false) {
+        runs[runId].status = "failed";
+        runs[runId].error = response.error || "Claude CLI failed to start.";
+        await chrome.storage.session.set({ [CLAUDE_CLI_RUNS_KEY]: runs });
+        throw new Error(runs[runId].error);
+      }
+      sendResponse({ ok: true, runId, ...(response.result || {}) });
+    } catch (error) {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  })();
+  return true;
+};
+
+const handleClaudeCliCancel = ({ message, sendResponse }) => {
+  (async () => {
+    try {
+      await waitForNativeHost();
+      const response = await queryNativeHostDirect({ type: "CLAUDE_CLI_CANCEL", runId: message.runId });
+      sendResponse(response.success === false
+        ? { ok: false, error: response.error }
+        : { ok: true, ...(response.result || {}) });
+    } catch (error) {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  })();
+  return true;
+};
+
+const handleClaudeCliGetState = ({ sendResponse }) => {
+  (async () => {
+    const runs = await ensureClaudeCliRuns();
+    sendResponse({
+      ok: true,
+      runs: Object.values(runs).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt))),
+      nativeConnected: Boolean(mcpNativePort),
+      nativeError: mcpNativeLastError
+    });
+  })().catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+  return true;
+};
+
+const handleClaudeCliClear = ({ message, sendResponse }) => {
+  (async () => {
+    const runs = await ensureClaudeCliRuns();
+    if (message.runId) {
+      if (runs[message.runId]?.status === "running") throw new Error("Cancel the run before clearing it.");
+      delete runs[message.runId];
+    } else {
+      for (const [runId, run] of Object.entries(runs)) {
+        if (!['running', 'starting'].includes(run.status)) delete runs[runId];
+      }
+    }
+    await chrome.storage.session.set({ [CLAUDE_CLI_RUNS_KEY]: runs });
+    sendResponse({ ok: true });
+  })().catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+  return true;
+};
 
 // -----------------------------
 // Entry point: check settings and connect if enabled
@@ -2000,14 +2412,18 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 async function handleNativeBridgeMessage(port, message) {
   console.debug("[MCP Native Bridge] ←", message);
 
+  if (message.type === "CLAUDE_CLI_EVENT") {
+    await recordClaudeCliEvent(message);
+    chrome.runtime.sendMessage(message).catch(() => {});
+    return;
+  }
+
   // Handle direct query responses (not MCP client pipeline)
-  if (message.type === "BASE_DIR" && message.requestId) {
+  if (message.requestId && mcpDirectQueryPending.has(message.requestId)) {
     const pending = mcpDirectQueryPending.get(message.requestId);
-    if (pending) {
-      mcpDirectQueryPending.delete(message.requestId);
-      clearTimeout(pending.timer);
-      pending.resolve(message);
-    }
+    mcpDirectQueryPending.delete(message.requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(message);
     return;
   }
 
@@ -2026,6 +2442,8 @@ async function handleNativeBridgeMessage(port, message) {
 // -----------------------------
 // MCP Tool Definitions
 // -----------------------------
+const freemarkerPreviewSessions = new Map();
+
 const MCP_TOOL_DEFINITIONS = [
   {
     name: "ping",
@@ -2106,6 +2524,72 @@ const MCP_TOOL_DEFINITIONS = [
         enabled: { type: "boolean", description: "True to enable, false to disable." }
       },
       required: ["enabled"]
+    }
+  },
+  {
+    name: "magic_netsuite_search_custom_tools",
+    description: "Search active user-created Magic NetSuite tools. Returns metadata, execution domain, selected modules, risk, and inputSchema without returning implementation source.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Keywords describing the needed custom capability. Leave empty to list all active custom tools." }
+      }
+    }
+  },
+  {
+    name: "magic_netsuite_create_custom_tool",
+    description: "Create a new editable custom NetSuite tool as a draft. If the name already exists, use magic_netsuite_update_custom_tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" }, displayName: { type: "string" }, description: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
+        domain: { type: "string", enum: ["client", "server", "both"] },
+        modules: { type: "array", items: { type: "string" } },
+        inputSchema: { type: "object" }, testInput: { type: "object", description: "Concrete saved test arguments matching inputSchema." }, code: { type: "string" },
+        risk: { type: "string", enum: ["read", "write"] }
+      },
+      required: ["name", "displayName", "description", "domain", "modules", "inputSchema", "testInput", "code", "risk"]
+    }
+  },
+  {
+    name: "magic_netsuite_update_custom_tool",
+    description: "Partially update an existing custom NetSuite tool by exact name. Omitted fields are preserved and AI edits return the tool to draft status for review.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        toolName: { type: "string" }, name: { type: "string" }, displayName: { type: "string" },
+        description: { type: "string" }, tags: { type: "array", items: { type: "string" } },
+        domain: { type: "string", enum: ["client", "server", "both"] },
+        modules: { type: "array", items: { type: "string" } }, inputSchema: { type: "object" }, testInput: { type: "object" },
+        code: { type: "string" }, risk: { type: "string", enum: ["read", "write"] }, enabled: { type: "boolean" }
+      },
+      required: ["toolName"]
+    }
+  },
+  {
+    name: "magic_netsuite_test_custom_tool",
+    description: "Test a saved active or draft custom tool in an allowed domain. Uses its saved testInput when input is omitted and stores the latest result on that tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        toolName: { type: "string" }, input: { type: "object" },
+        executionDomain: { type: "string", enum: ["client", "server"] }
+      },
+      required: ["toolName", "executionDomain"]
+    }
+  },
+  {
+    name: "magic_netsuite_call_custom_tool",
+    description: "Execute an active user-created Magic NetSuite tool in the authenticated NetSuite tab. Search first, then pass the exact toolName and an input object matching its inputSchema.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        toolName: { type: "string" },
+        input: { type: "object" },
+        executionDomain: { type: "string", enum: ["client", "server"] }
+      },
+      required: ["toolName", "input"]
     }
   },
   {
@@ -2716,6 +3200,43 @@ const MCP_TOOL_DEFINITIONS = [
       }
     }
   },
+  {
+    name: "netsuite_update_metadata_record",
+    description:
+      "Edit an existing NetSuite METADATA record in place with SuiteScript record.load -> setValue -> save. " +
+      "Destructive: this modifies customization metadata in the account. " +
+      "Handles four metadata record types via metadataType: 'customrecordtype' (custom record type definition, e.g. rename via recordname), " +
+      "'customrecordcustomfield' (a custom record's field, e.g. change label or fieldtype), " +
+      "'scriptcustomfield' (a script parameter), and 'script' (a script record). " +
+      "Identify the target by numeric internal id, OR by scriptId (resolved to the internal id via SuiteQL; scriptid is matched case-insensitively). " +
+      "Pass values as a map of metadata field id to new value, e.g. { recordname: 'New Name' } for a record type, " +
+      "or { label: 'New Label', fieldtype: 'CLOBTEXT' } for a field. Returns before/after values for the changed fields. " +
+      "PREFER this tool over netsuite_sdf_deploy for editing any of these four existing metadata types — it is faster and needs no object XML or redeploy. " +
+      "This edits existing objects only; use netsuite_sdf_deploy to CREATE new custom records/fields/scripts or to add/remove fields and make larger structural changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        metadataType: {
+          type: "string",
+          enum: ["customrecordtype", "customrecordcustomfield", "scriptcustomfield", "script"],
+          description: "The SuiteScript record type to edit. Aliases accepted: customrecord->customrecordtype, customrecordfield/field->customrecordcustomfield, scriptparameter/scriptparam->scriptcustomfield."
+        },
+        id: {
+          type: "string",
+          description: "Numeric internal id of the metadata record. Provide this or scriptId."
+        },
+        scriptId: {
+          type: "string",
+          description: "Script id of the metadata record (e.g. customrecord_my_type, custrecord_my_field, custscript_my_param, customscript_my_script). Resolved to the internal id if id is omitted."
+        },
+        values: {
+          type: "object",
+          description: "Map of metadata field id to new value. Record type: { recordname, description, ... }. Field: { label, fieldtype, selectrecordtype, ... }. Script param: { label, fieldtype, ... }."
+        }
+      },
+      required: ["metadataType", "values"]
+    }
+  },
   // ── Bundle Tools ──
   {
     name: "netsuite_list_bundles",
@@ -3068,7 +3589,8 @@ const MCP_TOOL_DEFINITIONS = [
   {
     name: "netsuite_sdf_deploy",
     description:
-      "Deploy NetSuite customizations via the bundled SuiteCloud SDF deploy tool. THE tool for creating or updating scripts+deployments, CUSTOM RECORD TYPES (with all their fields in one shot), and advanced PDF/HTML TEMPLATES — do not create these piecemeal with other tools. Deploying again with the same script/object IDs UPDATES the existing objects (create-or-update semantics). " +
+      "Deploy NetSuite customizations via the bundled SuiteCloud SDF deploy tool. THE tool for CREATING scripts+deployments, CUSTOM RECORD TYPES (with all their fields in one shot), and advanced PDF/HTML TEMPLATES — do not create these piecemeal with other tools. Deploying again with the same script/object IDs UPDATES the existing objects (create-or-update semantics). " +
+      "For simply EDITING an already-existing customrecordtype, customrecordcustomfield, scriptcustomfield, or script (e.g. rename, change a field's label/type, tweak one property), PREFER netsuite_update_metadata_record — it is a fast in-place record.load/setValue/save that needs no object XML or full redeploy. Use SDF for those types when creating them, adding/removing fields, or making larger structural changes. " +
       "PREFER THE STRUCTURED PAYLOADS — do NOT hand-write SDF XML: (1) SCRIPT: scriptType + scriptFile + deployments; (2) customRecords: record types with their fields; (3) templates: advanced PDF/HTML templates with FreeMarker source. " +
       "The raw `objects` array (full SDF object XML) is ONLY for other object types or XML obtained from netsuite_sdf_import_object. " +
       "Runs locally against the currently selected MCP account; if that account has no SuiteCloud login yet, a browser login console opens and the user must authenticate (first call for a new account may take longer or time out — retry after login). " +
@@ -3324,6 +3846,64 @@ const MCP_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {}
+    }
+  },
+  {
+    name: "netsuite_freemarker_preview_html",
+    description:
+      "Guarded FreeMarker renderer workflow, not the first step for template recreation. Use only after local BFO-safe template work and Playwright screenshot review, or when the user explicitly asks for renderer approval. If required server components are missing, this returns needsDeploymentApproval and the agent must ask the user before retrying with deployIfMissing:true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        html: { type: "string", description: "The proposed HTML preview to show to the user before FreeMarker conversion." },
+        title: { type: "string", description: "Optional preview title." },
+        recordType: { type: "string", description: "NetSuite record type to use later for the FreeMarker render, e.g. invoice." },
+        recordId: { type: "string", description: "NetSuite internal ID to use later for the FreeMarker render." },
+        deployIfMissing: { type: "boolean", description: "Only true after explicit user approval to deploy/repair renderer server components." }
+      },
+      required: ["html"]
+    }
+  },
+  {
+    name: "netsuite_freemarker_set_approval",
+    description:
+      "Mark a FreeMarker HTML preview session as approved or needing changes. Agents should only call this based on explicit user feedback from the MCP app preview.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Preview session ID returned by netsuite_freemarker_preview_html." },
+        approved: { type: "boolean", description: "True when the user approves the HTML preview; false when fixes are requested." },
+        feedback: { type: "string", description: "User fix notes when approved is false." }
+      },
+      required: ["sessionId", "approved"]
+    }
+  },
+  {
+    name: "netsuite_freemarker_approval_status",
+    description:
+      "Read the current approval status and feedback for a FreeMarker preview session before converting.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Preview session ID." }
+      },
+      required: ["sessionId"]
+    }
+  },
+  {
+    name: "netsuite_freemarker_convert_approved",
+    description:
+      "POST-APPROVAL ONLY. Convert an approved HTML preview session into a FreeMarker Advanced PDF template, or rerender a revised FreeMarker template from that approved session, against the selected NetSuite record.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Approved preview session ID." },
+        renderPdf: { type: "boolean", description: "Render the converted FreeMarker template immediately. Defaults to true." },
+        freemarker: { type: "string", description: "Optional revised FreeMarker/BFO template to render instead of regenerating it from the approved HTML." },
+        recordType: { type: "string", description: "Optional record type override for the render." },
+        recordId: { type: "string", description: "Optional record internal ID override for the render." }
+      },
+      required: ["sessionId"]
     }
   },
   {
@@ -3633,6 +4213,21 @@ async function handleRequest({ requestId, method, params }) {
         } else if (name === "magic_netsuite_set_skill_enabled") {
           result = await handleMagicSetSkillEnabled(args);
           executionSide = "local";
+        } else if (name === "magic_netsuite_search_custom_tools") {
+          result = await handleMagicSearchCustomTools(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_create_custom_tool") {
+          result = await handleMagicCreateCustomTool(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_update_custom_tool") {
+          result = await handleMagicUpdateCustomTool(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_test_custom_tool") {
+          result = await handleMagicTestCustomTool(args);
+          executionSide = args?.executionDomain || "client";
+        } else if (name === "magic_netsuite_call_custom_tool") {
+          result = await handleMagicCallCustomTool(args);
+          executionSide = args?.executionDomain || "client";
         } else if (name === "suiteql_get_guide") {
           result = { content: [{ type: "text", text: SUITEQL_GUIDE }] };
           executionSide = "local";
@@ -3672,6 +4267,8 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteCreateScriptField(args);
         } else if (name === "netsuite_update_script_field") {
           result = await handleNetsuiteUpdateScriptField(args);
+        } else if (name === "netsuite_update_metadata_record") {
+          result = await handleNetsuiteUpdateMetadataRecord(args);
         } else if (name === "netsuite_read_file") {
           result = await handleNetsuiteReadFile(args);
         } else if (name === "netsuite_find_file") {
@@ -3712,6 +4309,18 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteRunQuickScript(args);
         } else if (name === "magic_netsuite_deploy_server_components") {
           result = await handleMagicDeployServerComponents();
+        } else if (name === "netsuite_freemarker_preview_html") {
+          result = await handleFreemarkerPreviewHtml(args);
+          executionSide = "local";
+        } else if (name === "netsuite_freemarker_set_approval") {
+          result = await handleFreemarkerSetApproval(args);
+          executionSide = "local";
+        } else if (name === "netsuite_freemarker_approval_status") {
+          result = await handleFreemarkerApprovalStatus(args);
+          executionSide = "local";
+        } else if (name === "netsuite_freemarker_convert_approved") {
+          result = await handleFreemarkerConvertApproved(args);
+          executionSide = "local";
         } else if (name === "netsuite_get_logs") {
           result = await handleNetsuiteGetLogs(args);
         } else if (name === "netsuite_suitelet_stream_start") {
@@ -4457,6 +5066,24 @@ async function handleNetsuiteUpdateScriptField(args) {
   };
 }
 
+async function handleNetsuiteUpdateMetadataRecord(args) {
+  const metadataType = String(args?.metadataType ?? args?.type ?? "").trim();
+  const id = String(args?.id ?? "").trim();
+  const scriptId = String(args?.scriptId ?? "").trim();
+  if (!metadataType) throw new Error("metadataType is required.");
+  if (!id && !scriptId) throw new Error("Provide id (numeric internal id) or scriptId.");
+  if (!args?.values || typeof args.values !== "object" || Array.isArray(args.values)) {
+    throw new Error("values must be an object mapping metadata field IDs to values.");
+  }
+
+  const result = await callNetsuiteRoute(
+    "UPDATE_METADATA_RECORD",
+    { ...args, metadataType, ...(id ? { id } : {}), ...(scriptId ? { scriptId } : {}) },
+    "Failed to update metadata record."
+  );
+  return asMcpTextResult(result);
+}
+
 async function handleNetsuiteFindFile(args) {
   const { id, name } = args ?? {};
   if (!id && !name) throw new Error("At least one of 'id' or 'name' is required.");
@@ -5008,6 +5635,247 @@ async function handleMagicDeployServerComponents() {
     "Failed to deploy Magic NetSuite server components."
   );
   return asMcpTextResult(result);
+}
+
+function makeFreemarkerSessionId() {
+  return `fm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getFreemarkerSession(sessionId) {
+  const id = String(sessionId ?? "").trim();
+  if (!id) throw new Error("sessionId is required.");
+  const session = freemarkerPreviewSessions.get(id);
+  if (!session) throw new Error(`FreeMarker preview session "${id}" was not found.`);
+  return session;
+}
+
+function summarizeFreemarkerSession(session, includeHtml = false) {
+  return {
+    sessionId: session.sessionId,
+    title: session.title,
+    recordType: session.recordType,
+    recordId: session.recordId,
+    status: session.status,
+    approved: session.approved,
+    feedback: session.feedback,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    ...(includeHtml ? { html: session.html } : {}),
+    ...(session.freemarker ? { freemarker: session.freemarker } : {}),
+    ...(session.renderResult ? { renderResult: session.renderResult } : {})
+  };
+}
+
+function normalizePreviewHtml(html, title = "FreeMarker Preview") {
+  const source = String(html ?? "").trim();
+  if (!source) throw new Error("html is required.");
+  if (/<!doctype\s+html|<html[\s>]/i.test(source)) return source;
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtmlText(title)}</title>
+</head>
+<body>
+${source}
+</body>
+</html>`;
+}
+
+function escapeHtmlText(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function extractHtmlBody(html) {
+  const bodyMatch = String(html).match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+  return (bodyMatch ? bodyMatch[1] : String(html))
+    .replace(/<script\b[\s\S]*?<\/script>/gi, "")
+    .trim();
+}
+
+function extractHtmlStyles(html) {
+  const styles = [];
+  const re = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+  let match;
+  while ((match = re.exec(String(html)))) {
+    if (match[1]?.trim()) styles.push(match[1].trim());
+  }
+  return styles.join("\n\n");
+}
+
+function htmlToFreemarkerPdf(html, { title = "FreeMarker Template" } = {}) {
+  const body = extractHtmlBody(html) || "<div></div>";
+  const styles = extractHtmlStyles(html);
+  return `<?xml version="1.0"?>
+<!DOCTYPE pdf PUBLIC "-//big.faceless.org//report" "report-1.1.dtd">
+<pdf>
+  <head>
+    <title>${escapeHtmlText(title)}</title>${styles ? `
+    <style type="text/css">
+${styles}
+    </style>` : ""}
+  </head>
+  <body size="Letter">
+${body}
+  </body>
+</pdf>`;
+}
+
+function isRendererReady(status) {
+  if (!status || typeof status !== "object") return false;
+  if (status.allReady === true || status.ready === true || status.isReady === true) return true;
+  const components = Array.isArray(status.components) ? status.components : [];
+  return components.length > 0 && components.every(component =>
+    component?.ready === true ||
+    component?.exists === true ||
+    component?.status === "ready" ||
+    component?.status === "deployed"
+  );
+}
+
+async function ensureFreemarkerRendererReady(deployIfMissing) {
+  const before = await callNetsuiteRoute(
+    "CHECK_SERVER_COMPONENTS",
+    {},
+    "Failed to check Magic NetSuite server components."
+  );
+
+  if (isRendererReady(before)) return { ready: true, before, after: before };
+
+  if (!deployIfMissing) {
+    return {
+      ready: false,
+      needsDeploymentApproval: true,
+      before,
+      message:
+        "FreeMarker renderer server components are not deployed. Ask the user whether to deploy them. If the user refuses, stop. If approved, call this tool again with deployIfMissing:true."
+    };
+  }
+
+  const deployed = await callNetsuiteRoute(
+    "DEPLOY_SERVER_COMPONENTS",
+    {},
+    "Failed to deploy Magic NetSuite server components."
+  );
+  const after = await callNetsuiteRoute(
+    "CHECK_SERVER_COMPONENTS",
+    {},
+    "Failed to verify Magic NetSuite server components after deployment."
+  );
+  return { ready: isRendererReady(after), before, deployed, after };
+}
+
+async function handleFreemarkerPreviewHtml(args = {}) {
+  const title = String(args.title ?? "FreeMarker Preview").trim() || "FreeMarker Preview";
+  const readiness = await ensureFreemarkerRendererReady(args.deployIfMissing === true);
+
+  if (!readiness.ready) {
+    return asMcpTextResult({
+      ok: false,
+      needsDeploymentApproval: true,
+      message: readiness.message || "FreeMarker renderer server components are not ready.",
+      readiness
+    });
+  }
+
+  const html = normalizePreviewHtml(args.html, title);
+  const now = new Date().toISOString();
+  const session = {
+    sessionId: makeFreemarkerSessionId(),
+    title,
+    html,
+    recordType: String(args.recordType ?? "").trim(),
+    recordId: String(args.recordId ?? "").trim(),
+    status: "pending_approval",
+    approved: false,
+    feedback: "",
+    createdAt: now,
+    updatedAt: now
+  };
+  freemarkerPreviewSessions.set(session.sessionId, session);
+
+  return asMcpTextResult({
+    ok: true,
+    ...summarizeFreemarkerSession(session, true),
+    instructions:
+      "Show this HTML preview to the user. If approved, call netsuite_freemarker_set_approval with approved:true, then netsuite_freemarker_convert_approved. If fixes are requested, set approved:false with feedback and regenerate the HTML preview."
+  });
+}
+
+async function handleFreemarkerSetApproval(args = {}) {
+  const session = getFreemarkerSession(args.sessionId);
+  const approved = args.approved === true;
+  const feedback = String(args.feedback ?? "").trim();
+  session.approved = approved;
+  session.feedback = feedback;
+  session.status = approved ? "approved" : "needs_changes";
+  session.updatedAt = new Date().toISOString();
+  freemarkerPreviewSessions.set(session.sessionId, session);
+  return asMcpTextResult({
+    ok: true,
+    ...summarizeFreemarkerSession(session),
+    nextStep: approved
+      ? "Call netsuite_freemarker_convert_approved to convert the approved HTML."
+      : "Use feedback to revise the HTML, then create a new preview session."
+  });
+}
+
+async function handleFreemarkerApprovalStatus(args = {}) {
+  const session = getFreemarkerSession(args.sessionId);
+  return asMcpTextResult({
+    ok: true,
+    ...summarizeFreemarkerSession(session, true)
+  });
+}
+
+async function handleFreemarkerConvertApproved(args = {}) {
+  const session = getFreemarkerSession(args.sessionId);
+  if (!session.approved) {
+    return asMcpTextResult({
+      ok: false,
+      sessionId: session.sessionId,
+      status: session.status,
+      approved: session.approved,
+      feedback: session.feedback,
+      message: "Conversion is blocked until the user approves the HTML preview."
+    });
+  }
+
+  const recordType = String(args.recordType ?? session.recordType ?? "").trim();
+  const recordId = String(args.recordId ?? session.recordId ?? "").trim();
+  const renderPdf = args.renderPdf !== false;
+  const freemarkerOverride = String(args.freemarker ?? "").trim();
+  const freemarker = freemarkerOverride || htmlToFreemarkerPdf(session.html, { title: session.title });
+  let renderResult = null;
+
+  if (renderPdf) {
+    if (!recordType || !recordId) {
+      throw new Error("recordType and recordId are required to render the approved FreeMarker template.");
+    }
+    renderResult = await callNetsuiteRoute(
+      "RENDER_FREEMARKER_TEMPLATE",
+      { template: freemarker, recordType, recordId },
+      "Failed to render approved FreeMarker template."
+    );
+  }
+
+  session.freemarker = freemarker;
+  session.renderResult = renderResult;
+  session.recordType = recordType;
+  session.recordId = recordId;
+  session.status = renderPdf ? "rendered" : "converted";
+  session.updatedAt = new Date().toISOString();
+  freemarkerPreviewSessions.set(session.sessionId, session);
+
+  return asMcpTextResult({
+    ok: true,
+    ...summarizeFreemarkerSession(session),
+    freemarker,
+    renderResult
+  });
 }
 
 async function handleNetsuiteGetDeployedScripts(args) {

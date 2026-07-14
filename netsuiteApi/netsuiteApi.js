@@ -380,6 +380,85 @@ const updateRecordFields = (N, args = {}) => {
   };
 };
 
+const updateMetadataRecord = async (N, args = {}) => {
+  const { record } = N;
+  const typeMap = {
+    customrecordtype: { load: ["customrecordtype"], table: "customrecordtype", idColumn: "internalid" },
+    customrecord: { load: ["customrecordtype"], table: "customrecordtype", idColumn: "internalid" },
+    customrecordcustomfield: { load: ["customrecordcustomfield"], table: "customfield", idColumn: "internalid" },
+    customrecordfield: { load: ["customrecordcustomfield"], table: "customfield", idColumn: "internalid" },
+    field: { load: ["customrecordcustomfield"], table: "customfield", idColumn: "internalid" },
+    scriptcustomfield: { load: ["scriptcustomfield", "scriptcustfield"], table: "customfield", idColumn: "internalid" },
+    scriptparameter: { load: ["scriptcustomfield", "scriptcustfield"], table: "customfield", idColumn: "internalid" },
+    scriptparam: { load: ["scriptcustomfield", "scriptcustfield"], table: "customfield", idColumn: "internalid" },
+    script: { load: ["script"], table: "script", idColumn: "id" }
+  };
+
+  const metadataType = String(args.metadataType ?? args.type ?? "").trim().toLowerCase();
+  const config = typeMap[metadataType];
+  if (!config) {
+    throw new Error(
+      `metadataType must be one of: customrecordtype, customrecordcustomfield, scriptcustomfield, script. Got: ${metadataType}`
+    );
+  }
+
+  const values = assertFieldValueMap(args.values);
+  let id = String(args.id ?? "").trim();
+  if (!id) {
+    const scriptId = String(args.scriptId ?? "").trim();
+    if (!scriptId) throw new Error("Provide id (numeric internal id) or scriptId.");
+    const row = await firstSuiteQLRow(
+      N,
+      `SELECT ${config.idColumn} AS internalid FROM ${config.table} ` +
+        `WHERE UPPER(scriptid) = UPPER(${sqlLiteral(scriptId)}) AND ROWNUM <= 1`
+    );
+    if (!row?.internalid) {
+      throw new Error(`No ${metadataType} found with scriptid ${scriptId}`);
+    }
+    id = String(row.internalid);
+  }
+  if (!/^\d+$/.test(id)) throw new Error("id must be a numeric internal id.");
+
+  let rec = null;
+  let recordType = "";
+  let lastError = null;
+  for (const candidate of config.load) {
+    try {
+      rec = record.load({ type: candidate, id, isDynamic: false });
+      recordType = candidate;
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (!rec) throw lastError || new Error(`Unable to load metadata record id ${id}`);
+
+  const fieldIds = Object.keys(values);
+  const before = {};
+  for (const fieldId of fieldIds) {
+    try { before[fieldId] = rec.getValue({ fieldId }); }
+    catch { before[fieldId] = null; }
+  }
+
+  setRecordValues(N, rec, values);
+  const savedId = rec.save({ enableSourcing: false, ignoreMandatoryFields: true });
+  const after = {};
+  for (const fieldId of fieldIds) {
+    try { after[fieldId] = rec.getValue({ fieldId }); }
+    catch { after[fieldId] = null; }
+  }
+
+  return {
+    metadataType,
+    recordType,
+    id: savedId,
+    before,
+    after,
+    updated: true,
+    executionSide: "page"
+  };
+};
+
 const getSelectOptions = (rec, fieldId, filter = "") => {
   try {
     const field = rec.getField({ fieldId });
@@ -3658,6 +3737,10 @@ const handlers = {
   UPDATE_SCRIPT_FIELD: async ({ modules, payload }) => {
     console.log("Update Script Field action received");
     return updateScriptField(modules, payload);
+  },
+  UPDATE_METADATA_RECORD: async ({ modules, payload }) => {
+    console.log("Update Metadata Record action received", payload);
+    return updateMetadataRecord(modules, payload);
   },
   FIND_FOLDER: async ({ modules, payload: { id, name } }) => {
     console.log("Find Folder action received", { id, name });

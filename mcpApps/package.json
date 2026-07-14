@@ -5,13 +5,14 @@
   "description": "Interactive MCP App for sending NetSuite files and records into Claude chat.",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc --noEmit && cross-env INPUT=mcp-app.html vite build && tsc -p tsconfig.server.json",
-    "start": "concurrently \"cross-env NODE_ENV=development INPUT=mcp-app.html vite build --watch\" \"tsx watch main.ts\"",
+    "build": "tsc --noEmit && cross-env INPUT=mcp-app.html vite build && cross-env INPUT=template-review.html vite build && tsc -p tsconfig.server.json",
+    "start": "concurrently \"cross-env NODE_ENV=development INPUT=mcp-app.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=template-review.html vite build --watch\" \"tsx watch main.ts\"",
     "start:stdio": "npm run build 1>&2 && node dist/main.js --stdio",
     "serve": "node dist/main.js",
     "check": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
+    "@lucide/vue": "^1.24.0",
     "@modelcontextprotocol/ext-apps": "^1.1.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ajv": "^8.20.0",

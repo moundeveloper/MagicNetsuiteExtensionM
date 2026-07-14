@@ -1255,6 +1255,53 @@ define(
     // netsuite_create_script_record removed: script/deployment creation now
     // goes through the SDF deploy companion (netsuite_sdf_deploy). record.create
     // on the 'script' type is blocked by NetSuite anyway.
+    netsuite_update_metadata_record: function(args) {
+      var typeMap = {
+        customrecordtype: { load: ['customrecordtype'], table: 'customrecordtype', idCol: 'internalid' },
+        customrecord: { load: ['customrecordtype'], table: 'customrecordtype', idCol: 'internalid' },
+        customrecordfield: { load: ['customrecordcustomfield'], table: 'customfield', idCol: 'internalid' },
+        customrecordcustomfield: { load: ['customrecordcustomfield'], table: 'customfield', idCol: 'internalid' },
+        field: { load: ['customrecordcustomfield'], table: 'customfield', idCol: 'internalid' },
+        scriptparameter: { load: ['scriptcustomfield', 'scriptcustfield'], table: 'customfield', idCol: 'internalid' },
+        scriptcustomfield: { load: ['scriptcustomfield', 'scriptcustfield'], table: 'customfield', idCol: 'internalid' },
+        scriptparam: { load: ['scriptcustomfield', 'scriptcustfield'], table: 'customfield', idCol: 'internalid' },
+        script: { load: ['script'], table: 'script', idCol: 'id' }
+      };
+      var key = String(args.metadataType || args.type || '').trim().toLowerCase();
+      var cfg = typeMap[key];
+      if (!cfg) throw new Error('metadataType must be one of: customrecordtype, customrecordcustomfield, scriptcustomfield, script. Got: ' + key);
+
+      var values = args.values || {};
+      if (!Object.keys(values).length) throw new Error('values is required (map of field id to value).');
+
+      var id = (args.id != null && String(args.id).trim() !== '') ? parseId(args.id, 'id') : null;
+      if (id == null) {
+        var scriptId = String(args.scriptId || '').trim();
+        if (!scriptId) throw new Error('Provide id (numeric internal id) or scriptId.');
+        var rows = runSuiteQL(
+          'SELECT ' + cfg.idCol + ' AS internalid FROM ' + cfg.table +
+          " WHERE UPPER(scriptid) = UPPER('" + escapeSqlLike(scriptId) + "') AND ROWNUM <= 1"
+        );
+        if (!rows.length) throw new Error('No ' + key + ' found with scriptid ' + scriptId);
+        id = parseId(rows[0].internalid, 'internalid');
+      }
+
+      var loaded = null, lastErr = null;
+      for (var i = 0; i < cfg.load.length; i += 1) {
+        try { loaded = { rec: record.load({ type: cfg.load[i], id: id, isDynamic: false }), recordType: cfg.load[i] }; break; }
+        catch (e) { lastErr = e; }
+      }
+      if (!loaded) throw lastErr || new Error('Unable to load metadata record id ' + id);
+
+      var changed = Object.keys(values);
+      var before = {};
+      changed.forEach(function(f) { try { before[f] = loaded.rec.getValue({ fieldId: f }); } catch (_) { before[f] = null; } });
+      applyValues(loaded.rec, values);
+      var savedId = loaded.rec.save({ enableSourcing: false, ignoreMandatoryFields: true });
+      var after = {};
+      changed.forEach(function(f) { try { after[f] = loaded.rec.getValue({ fieldId: f }); } catch (_) { after[f] = null; } });
+      return { metadataType: key, recordType: loaded.recordType, id: savedId, before: before, after: after, updated: true };
+    },
     netsuite_run_quick_script: function(args) {
       var code = String(args.code || '').trim();
       if (!code) throw new Error('code is required.');

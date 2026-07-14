@@ -12,6 +12,8 @@ const PROFILE_DIR = process.env.MAGIC_NS_PW_PROFILE ||
 // killed (e.g. on Claude restart). We additionally snapshot storageState
 // (which captures session cookies) and re-inject it on launch.
 const STATE_FILE = path.join(path.dirname(PROFILE_DIR), "magic-ns-storage-state.json");
+const TEMPLATE_REVIEW_STATE_FILE = process.env.MAGIC_NS_TEMPLATE_REVIEW_STATE ||
+    path.join(path.dirname(PROFILE_DIR), "template-review-state.json");
 const NAV_TIMEOUT = 45000;
 // Extension logo, used as the Playwright tab favicon. Read from disk at startup
 // (dev runs from mcp_app/, built runs from mcp_app/dist/), so try both depths.
@@ -34,7 +36,23 @@ const FAVICON_DATA_URI = (() => {
 })();
 let context = null;
 let page = null;
+let templateReviewPage = null;
 let launching = null;
+let templateReviewState = null;
+let templateReviewBindingReady = false;
+const templateReviewWaiters = new Set();
+let templateReviewRecoveryTimer = null;
+let templateReviewRecoveryInFlight = false;
+let templateRecordOptionsResolver = null;
+function dismissTemplateReviewSurface() {
+    if (templateReviewRecoveryTimer) {
+        clearTimeout(templateReviewRecoveryTimer);
+        templateReviewRecoveryTimer = null;
+    }
+    if (isPendingTemplateReview(templateReviewState || loadPersistedTemplateReviewState())) {
+        applyTemplateReviewUpdate({ status: "done", feedback: "" });
+    }
+}
 async function launch() {
     const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
         headless: false, // actions must be visible (user requirement)
@@ -45,6 +63,9 @@ async function launch() {
     ctx.on("close", () => {
         context = null;
         page = null;
+        templateReviewPage = null;
+        templateReviewBindingReady = false;
+        scheduleTemplateReviewRecovery();
     });
     // Re-inject previously saved session cookies (lost from the profile on close).
     try {
@@ -103,6 +124,44 @@ async function ensurePage() {
         launching = null;
     });
     return launching;
+}
+async function ensureTemplateReviewPage() {
+    if (templateReviewPage && !templateReviewPage.isClosed())
+        return templateReviewPage;
+    await ensurePage();
+    if (!context)
+        throw new Error("Playwright browser context is unavailable.");
+    const p = await context.newPage();
+    templateReviewPage = p;
+    templateReviewBindingReady = false;
+    let crashed = false;
+    p.on("crash", () => {
+        crashed = true;
+        if (templateReviewPage === p)
+            templateReviewPage = null;
+        templateReviewBindingReady = false;
+        scheduleTemplateReviewRecovery(250);
+    });
+    p.on("framenavigated", (frame) => {
+        if (frame === p.mainFrame() && isPendingTemplateReview(templateReviewState || loadPersistedTemplateReviewState())) {
+            scheduleTemplateReviewRecovery(150);
+        }
+    });
+    p.on("domcontentloaded", () => {
+        if (isPendingTemplateReview(templateReviewState || loadPersistedTemplateReviewState())) {
+            scheduleTemplateReviewRecovery(100);
+        }
+    });
+    p.on("close", () => {
+        if (templateReviewPage === p)
+            templateReviewPage = null;
+        templateReviewBindingReady = false;
+        if (crashed)
+            scheduleTemplateReviewRecovery(250);
+        else
+            dismissTemplateReviewSurface();
+    });
+    return p;
 }
 // NetSuite bounces unauthenticated requests to a login form. Detect it so the
 // caller can tell the user to log in once in the visible window.
@@ -191,6 +250,27 @@ async function screenshotB64(p) {
     const buf = await p.screenshot({ type: "jpeg", quality: 60 });
     return buf.toString("base64");
 }
+async function templateArtifactScreenshots(p) {
+    if (await p.locator("#pdfFrame").first().isVisible().catch(() => false)) {
+        await p.waitForTimeout(800);
+    }
+    const capture = async (selector) => {
+        try {
+            const locator = p.locator(selector).first();
+            if (!(await locator.isVisible({ timeout: 1200 })))
+                return undefined;
+            const buffer = await locator.screenshot({ type: "jpeg", quality: 82 });
+            return buffer.toString("base64");
+        }
+        catch {
+            return undefined;
+        }
+    };
+    return {
+        htmlScreenshot: await capture("#htmlFrame"),
+        pdfScreenshot: await capture("#pdfFrame"),
+    };
+}
 // Wait for the page to actually finish loading after an action before we
 // screenshot: full load + network idle + NetSuite's own loading indicators
 // gone, plus a small settle for late client-side rendering.
@@ -255,8 +335,439 @@ async function brandTab(p, title, favicon) {
         /* page navigated mid-brand — best effort */
     }
 }
+function makeReviewId() {
+    return `review_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+function defaultTemplateReviewComments() {
+    return [];
+}
+function withoutUndefined(value) {
+    return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+function stringArray(value, fallback = []) {
+    return Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : fallback;
+}
+function makeEmptyTemplateReviewState() {
+    return {
+        reviewId: makeReviewId(),
+        title: "NetSuite Template Review",
+        templateFile: "invoice_template.ftl",
+        recordType: "invoice",
+        recordId: "",
+        recordTypeOptions: ["invoice"],
+        recordIdOptions: [],
+        recordTypeLabels: { invoice: "Invoice" },
+        recordIdLabels: {},
+        html: "",
+        freemarker: "",
+        pdfDataUrl: "",
+        renderError: "",
+        sessionId: "",
+        referenceImageDataUrl: "",
+        referenceImageUrl: "",
+        feedback: "",
+        comments: defaultTemplateReviewComments(),
+        status: "html_review",
+        version: 0,
+        updatedAt: new Date().toISOString(),
+    };
+}
+function normalizeTemplateReviewState(value) {
+    if (!value || typeof value !== "object")
+        return null;
+    const input = value;
+    const migratedStatus = {
+        open: "html_review",
+        needs_changes: "html_changes_requested",
+        approved: "html_approved",
+        ftl_review: "freemarker_review",
+        ftl_approved: "freemarker_approved",
+    };
+    const rawStatus = typeof input.status === "string" ? input.status : "";
+    const allowedStatuses = new Set([
+        "html_review", "html_changes_requested", "html_approved", "converting",
+        "freemarker_review", "freemarker_changes_requested", "freemarker_approved",
+        "render_error", "done",
+    ]);
+    const status = allowedStatuses.has(rawStatus)
+        ? rawStatus
+        : migratedStatus[rawStatus] || "html_review";
+    return {
+        ...makeEmptyTemplateReviewState(),
+        reviewId: typeof input.reviewId === "string" && input.reviewId ? input.reviewId : makeReviewId(),
+        title: typeof input.title === "string" && input.title ? input.title : "NetSuite Template Review",
+        templateFile: typeof input.templateFile === "string" && input.templateFile ? input.templateFile : "invoice_template.ftl",
+        recordType: typeof input.recordType === "string" && input.recordType ? input.recordType : "invoice",
+        recordId: typeof input.recordId === "string" ? input.recordId : "",
+        recordTypeOptions: stringArray(input.recordTypeOptions, ["invoice"]),
+        recordIdOptions: stringArray(input.recordIdOptions),
+        recordTypeLabels: input.recordTypeLabels && typeof input.recordTypeLabels === "object" ? input.recordTypeLabels : {},
+        recordIdLabels: input.recordIdLabels && typeof input.recordIdLabels === "object" ? input.recordIdLabels : {},
+        html: typeof input.html === "string" ? input.html : "",
+        freemarker: typeof input.freemarker === "string" ? input.freemarker : "",
+        pdfDataUrl: typeof input.pdfDataUrl === "string" ? input.pdfDataUrl : "",
+        renderError: typeof input.renderError === "string" ? input.renderError : "",
+        sessionId: typeof input.sessionId === "string" ? input.sessionId : "",
+        referenceImageDataUrl: typeof input.referenceImageDataUrl === "string" ? input.referenceImageDataUrl : "",
+        referenceImageUrl: typeof input.referenceImageUrl === "string" ? input.referenceImageUrl : "",
+        feedback: typeof input.feedback === "string" ? input.feedback : "",
+        comments: Array.isArray(input.comments) ? input.comments : [],
+        status,
+        version: typeof input.version === "number" ? input.version : 0,
+        updatedAt: typeof input.updatedAt === "string" ? input.updatedAt : new Date().toISOString(),
+    };
+}
+function loadPersistedTemplateReviewState() {
+    for (const file of [TEMPLATE_REVIEW_STATE_FILE, `${TEMPLATE_REVIEW_STATE_FILE}.bak`]) {
+        try {
+            const state = normalizeTemplateReviewState(JSON.parse(fs.readFileSync(file, "utf8")));
+            if (state)
+                return state;
+        }
+        catch {
+            /* try the journal backup */
+        }
+    }
+    return null;
+}
+function currentReviewSnapshot() {
+    if (!templateReviewState)
+        templateReviewState = loadPersistedTemplateReviewState();
+    if (!templateReviewState)
+        throw new Error("No template review is open.");
+    return { ...templateReviewState };
+}
+function resolveTemplateReview(state) {
+    for (const resolve of templateReviewWaiters)
+        resolve({ ...state });
+    templateReviewWaiters.clear();
+}
+function persistTemplateReviewState(state) {
+    try {
+        fs.mkdirSync(path.dirname(TEMPLATE_REVIEW_STATE_FILE), { recursive: true });
+        const serialized = JSON.stringify({
+            reviewId: state.reviewId,
+            title: state.title,
+            templateFile: state.templateFile,
+            recordType: state.recordType,
+            recordId: state.recordId,
+            recordTypeOptions: state.recordTypeOptions,
+            recordIdOptions: state.recordIdOptions,
+            recordTypeLabels: state.recordTypeLabels,
+            recordIdLabels: state.recordIdLabels,
+            html: state.html,
+            freemarker: state.freemarker,
+            pdfDataUrl: state.pdfDataUrl,
+            renderError: state.renderError,
+            sessionId: state.sessionId,
+            referenceImageDataUrl: state.referenceImageDataUrl,
+            referenceImageUrl: state.referenceImageUrl,
+            status: state.status,
+            feedback: state.feedback,
+            comments: state.comments,
+            version: state.version,
+            updatedAt: state.updatedAt,
+            pending: state.status === "html_review" ||
+                state.status === "html_changes_requested" ||
+                state.status === "freemarker_review" ||
+                state.status === "freemarker_changes_requested" ||
+                state.status === "render_error",
+        }, null, 2);
+        const nextFile = `${TEMPLATE_REVIEW_STATE_FILE}.next`;
+        const backupFile = `${TEMPLATE_REVIEW_STATE_FILE}.bak`;
+        fs.writeFileSync(nextFile, serialized, "utf8");
+        fs.rmSync(backupFile, { force: true });
+        if (fs.existsSync(TEMPLATE_REVIEW_STATE_FILE))
+            fs.renameSync(TEMPLATE_REVIEW_STATE_FILE, backupFile);
+        fs.renameSync(nextFile, TEMPLATE_REVIEW_STATE_FILE);
+    }
+    catch {
+        /* The previous main/backup remains recoverable if a write is interrupted. */
+    }
+}
+function isPendingTemplateReview(state) {
+    return Boolean(state && state.status !== "done" && state.status !== "freemarker_approved");
+}
+async function pushTemplateReviewState(p, state) {
+    return p.evaluate((next) => {
+        const w = window;
+        if (!document.querySelector(".review-app") || !w.__magicTemplateReviewSet)
+            return false;
+        w.__magicTemplateReviewSet(next);
+        return true;
+    }, state).catch(() => false);
+}
+async function rehydrateTemplateReviewSurface() {
+    const state = templateReviewState || loadPersistedTemplateReviewState();
+    if (!isPendingTemplateReview(state))
+        return null;
+    templateReviewState = state;
+    const p = await ensureTemplateReviewPage();
+    await ensureTemplateReviewBinding(p);
+    if (!(await pushTemplateReviewState(p, state))) {
+        await p.setContent(buildTemplateReviewHtml(state), { waitUntil: "load", timeout: NAV_TIMEOUT });
+        await settlePage(p);
+        await brandTab(p, `${BRAND_TITLE_PREFIX} ${state.title}`.trim(), FAVICON_DATA_URI);
+    }
+    return p;
+}
+function scheduleTemplateReviewRecovery(delayMs = 400) {
+    if (templateReviewRecoveryTimer || templateReviewRecoveryInFlight)
+        return;
+    const state = templateReviewState || loadPersistedTemplateReviewState();
+    if (!isPendingTemplateReview(state))
+        return;
+    templateReviewRecoveryTimer = setTimeout(async () => {
+        templateReviewRecoveryTimer = null;
+        templateReviewRecoveryInFlight = true;
+        try {
+            await rehydrateTemplateReviewSurface();
+        }
+        catch {
+            setTimeout(() => scheduleTemplateReviewRecovery(2000), 2000);
+        }
+        finally {
+            templateReviewRecoveryInFlight = false;
+        }
+    }, delayMs);
+}
+function applyTemplateReviewUpdate(patch) {
+    if (!templateReviewState) {
+        templateReviewState = loadPersistedTemplateReviewState() || makeEmptyTemplateReviewState();
+    }
+    const cleanPatch = withoutUndefined(patch);
+    templateReviewState = {
+        ...templateReviewState,
+        ...cleanPatch,
+        version: templateReviewState.version + 1,
+        updatedAt: new Date().toISOString(),
+    };
+    persistTemplateReviewState(templateReviewState);
+    if (templateReviewState.status === "html_approved" ||
+        templateReviewState.status === "freemarker_approved" ||
+        templateReviewState.status === "html_changes_requested" ||
+        templateReviewState.status === "freemarker_changes_requested" ||
+        templateReviewState.status === "done") {
+        resolveTemplateReview(templateReviewState);
+    }
+    return { ...templateReviewState };
+}
+async function ensureTemplateReviewBinding(p) {
+    if (templateReviewBindingReady)
+        return;
+    try {
+        await p.exposeBinding("__magicTemplateReviewAction", async (_source, payload) => {
+            if (payload.action === "end_review") {
+                const state = applyTemplateReviewUpdate({ status: "done", feedback: "" });
+                setTimeout(() => p.close().catch(() => { }), 0);
+                return { ok: true, version: state.version };
+            }
+            if (payload.action === "reference_updated") {
+                const referenceImageDataUrl = String(payload.referenceImageDataUrl || "");
+                if (referenceImageDataUrl.startsWith("data:image/")) {
+                    applyTemplateReviewUpdate({ referenceImageDataUrl, referenceImageUrl: "" });
+                }
+                return { ok: true };
+            }
+            if (payload.action === "record_options_requested") {
+                const recordType = String(payload.recordType || templateReviewState?.recordType || "invoice");
+                if (!templateRecordOptionsResolver)
+                    return { ok: false, message: "NetSuite record lookup is unavailable." };
+                const options = await templateRecordOptionsResolver(recordType);
+                const state = applyTemplateReviewUpdate({
+                    recordType,
+                    recordId: "",
+                    recordTypeOptions: options.recordTypeOptions,
+                    recordIdOptions: options.recordIdOptions,
+                    recordTypeLabels: options.recordTypeLabels,
+                    recordIdLabels: options.recordIdLabels,
+                });
+                await pushTemplateReviewState(p, state);
+                return { ok: true, ...options };
+            }
+            if (payload.action === "context_updated") {
+                const state = applyTemplateReviewUpdate({
+                    recordType: String(payload.recordType ?? templateReviewState?.recordType ?? "invoice"),
+                    recordId: String(payload.recordId ?? templateReviewState?.recordId ?? ""),
+                });
+                return { ok: true, version: state.version };
+            }
+            const requestedStatus = String(payload.status || "");
+            const allowedActions = new Set([
+                "html_approved", "html_changes_requested", "freemarker_approved",
+                "freemarker_changes_requested", "done",
+            ]);
+            const status = allowedActions.has(requestedStatus)
+                ? requestedStatus
+                : "html_changes_requested";
+            const state = applyTemplateReviewUpdate({
+                status,
+                feedback: String(payload.feedback ?? ""),
+                comments: Array.isArray(payload.comments)
+                    ? payload.comments
+                    : templateReviewState?.comments,
+                recordType: String(payload.recordType ?? templateReviewState?.recordType ?? ""),
+                recordId: String(payload.recordId ?? templateReviewState?.recordId ?? ""),
+            });
+            return { ok: true, version: state.version };
+        });
+        templateReviewBindingReady = true;
+    }
+    catch {
+        templateReviewBindingReady = true;
+    }
+}
+function buildTemplateReviewHtml(state) {
+    const data = JSON.stringify(state).replace(/</g, "\\u003c");
+    const candidates = [
+        path.join(import.meta.dirname, "dist", "template-review.html"),
+        path.join(import.meta.dirname, "template-review.html"),
+        path.join(import.meta.dirname, "..", "dist", "template-review.html"),
+    ];
+    for (const file of candidates) {
+        try {
+            const html = fs.readFileSync(file, "utf8");
+            const boot = `<script>window.__MAGIC_TEMPLATE_REVIEW_INITIAL__=${data};</script>`;
+            return html.includes("</head>") ? html.replace("</head>", `${boot}</head>`) : `${boot}${html}`;
+        }
+        catch {
+            /* try next */
+        }
+    }
+    throw new Error("Template review UI asset was not found. Run the mcp_app production build before starting the server.");
+}
 export const playwrightController = {
     profileDir: PROFILE_DIR,
+    setTemplateRecordOptionsResolver(resolver) {
+        templateRecordOptionsResolver = resolver;
+    },
+    async previewHtml(html, label = "FreeMarker Preview") {
+        if (!html.trim())
+            throw new Error("HTML is required for the Playwright preview.");
+        const p = await ensurePage();
+        await p.setContent(html, { waitUntil: "load", timeout: NAV_TIMEOUT });
+        await p.setViewportSize({ width: 1100, height: 1400 }).catch(() => { });
+        await p.emulateMedia({ media: "screen" }).catch(() => { });
+        await settlePage(p);
+        await brandTab(p, `${BRAND_TITLE_PREFIX} ${label}`.trim(), FAVICON_DATA_URI);
+        const info = await p.evaluate(() => ({
+            title: document.title,
+            url: location.href,
+            bodyTextLength: document.body?.innerText?.length ?? 0,
+            documentHeight: Math.ceil(document.documentElement.scrollHeight),
+            documentWidth: Math.ceil(document.documentElement.scrollWidth),
+        }));
+        return { ok: true, ...info, screenshot: await screenshotB64(p) };
+    },
+    async openTemplateReview(opts) {
+        if (!opts.html.trim())
+            throw new Error("HTML is required for the template review.");
+        const p = await ensureTemplateReviewPage();
+        await ensureTemplateReviewBinding(p);
+        const state = applyTemplateReviewUpdate({
+            reviewId: makeReviewId(),
+            title: opts.title || "NetSuite Template Review",
+            templateFile: opts.templateFile || "invoice_template.ftl",
+            recordType: opts.recordType || "invoice",
+            recordId: opts.recordId || "",
+            recordTypeOptions: opts.recordTypeOptions?.length ? opts.recordTypeOptions : [opts.recordType || "invoice"],
+            recordIdOptions: opts.recordIdOptions?.length ? opts.recordIdOptions : (opts.recordId ? [opts.recordId] : []),
+            recordTypeLabels: opts.recordTypeLabels || {},
+            recordIdLabels: opts.recordIdLabels || {},
+            html: opts.html,
+            freemarker: opts.freemarker || "",
+            pdfDataUrl: opts.pdfDataUrl || "",
+            renderError: "",
+            sessionId: opts.sessionId || "",
+            referenceImageDataUrl: opts.referenceImageDataUrl || "",
+            referenceImageUrl: opts.referenceImageUrl || "",
+            feedback: "",
+            comments: defaultTemplateReviewComments(),
+            status: "html_review",
+        });
+        await p.setContent(buildTemplateReviewHtml(state), { waitUntil: "load", timeout: NAV_TIMEOUT });
+        await settlePage(p);
+        await brandTab(p, `${BRAND_TITLE_PREFIX} ${state.title}`.trim(), FAVICON_DATA_URI);
+        const referenceLoaded = await p.locator("#referenceImage").evaluate((image) => image.complete && image.naturalWidth > 0).catch(() => false);
+        return { ok: true, ...state, referenceLoaded, ...(await templateArtifactScreenshots(p)) };
+    },
+    async updateTemplateReview(opts) {
+        const p = await ensureTemplateReviewPage();
+        if (!templateReviewState || (!opts.html && !templateReviewState.html)) {
+            const pageState = await p.evaluate(() => {
+                const w = window;
+                return w.__magicTemplateReviewGet ? w.__magicTemplateReviewGet() : null;
+            }).catch(() => null);
+            const recovered = normalizeTemplateReviewState(pageState) || loadPersistedTemplateReviewState();
+            if (recovered)
+                templateReviewState = recovered;
+        }
+        if (!opts.html && !templateReviewState?.html) {
+            throw new Error("Template review update refused because no existing HTML preview could be recovered. Pass the revised HTML to magic_netsuite_template_review_update.");
+        }
+        const state = applyTemplateReviewUpdate(opts);
+        await ensureTemplateReviewBinding(p);
+        const pushed = await pushTemplateReviewState(p, state);
+        if (!pushed) {
+            await p.setContent(buildTemplateReviewHtml(state), { waitUntil: "load", timeout: NAV_TIMEOUT });
+        }
+        await settlePage(p);
+        return { ok: true, ...state, ...(await templateArtifactScreenshots(p)) };
+    },
+    async waitTemplateReview(timeoutMs = 900000) {
+        const existing = currentReviewSnapshot();
+        if (existing.status === "html_approved" ||
+            existing.status === "freemarker_approved" ||
+            existing.status === "html_changes_requested" ||
+            existing.status === "freemarker_changes_requested" ||
+            existing.status === "done") {
+            return { ok: true, ...existing };
+        }
+        await rehydrateTemplateReviewSurface();
+        const state = await new Promise((resolve, reject) => {
+            let monitoring = false;
+            const cleanup = () => {
+                clearTimeout(timer);
+                clearInterval(monitor);
+                templateReviewWaiters.delete(done);
+            };
+            const timer = setTimeout(() => {
+                cleanup();
+                reject(new Error("Timed out waiting for template review action."));
+            }, Math.max(1000, timeoutMs));
+            const done = (value) => {
+                cleanup();
+                resolve(value);
+            };
+            templateReviewWaiters.add(done);
+            const monitor = setInterval(async () => {
+                if (monitoring)
+                    return;
+                monitoring = true;
+                try {
+                    const persisted = loadPersistedTemplateReviewState();
+                    if (persisted && persisted.version > (templateReviewState?.version ?? -1))
+                        templateReviewState = persisted;
+                    const current = templateReviewState;
+                    if (current && ["html_approved", "freemarker_approved", "html_changes_requested", "freemarker_changes_requested", "done"].includes(current.status)) {
+                        done(current);
+                        return;
+                    }
+                    await rehydrateTemplateReviewSurface();
+                }
+                catch {
+                    scheduleTemplateReviewRecovery(1000);
+                }
+                finally {
+                    monitoring = false;
+                }
+            }, 1500);
+        });
+        return { ok: true, ...state };
+    },
+    templateReviewState() {
+        return { ok: true, ...currentReviewSnapshot() };
+    },
     async open(url, cookies, label) {
         if (!url)
             throw new Error("A Suitelet URL is required to open in Playwright.");
