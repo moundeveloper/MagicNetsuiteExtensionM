@@ -1359,13 +1359,13 @@ define(
   [
     'N/record', 'N/search', 'N/query', 'N/log', 'N/file', 'N/url', 'N/runtime',
     'N/format', 'N/email', 'N/render', 'N/task', 'N/workflow',
-    'N/https', 'N/http', 'N/encode', 'N/error', 'N/xml',
+    'N/https', 'N/http', 'N/encode', 'N/error', 'N/xml', 'N/crypto',
     'N/currency', 'N/transaction', 'N/redirect',
     './magic_netsuite_mcp_server'
   ],
   (record, search, query, log, file, url, runtime,
    format, email, render, task, workflow,
-   https, http, encode, nsError, xml,
+   https, http, encode, nsError, xml, crypto,
    currency, transaction, redirect, mcpServerModule) => {
 
   var __serialize = function(a) {
@@ -1388,7 +1388,7 @@ define(
       var userFn = new Function(
         'record', 'search', 'query', 'log', 'file', 'url', 'runtime',
         'format', 'email', 'render', 'task', 'workflow',
-        'https', 'http', 'encode', 'error', 'xml',
+        'https', 'http', 'encode', 'error', 'xml', 'crypto',
         'currency', 'transaction', 'redirect',
         'context', 'console',
         code
@@ -1396,7 +1396,7 @@ define(
       __result = userFn(
         N.record, N.search, N.query, N.log, N.file, N.url, N.runtime,
         N.format, N.email, N.render, N.task, N.workflow,
-        N.https, N.http, N.encode, N.nsError, N.xml,
+        N.https, N.http, N.encode, N.nsError, N.xml, N.crypto,
         N.currency, N.transaction, N.redirect,
         N.context, fakeConsole
       );
@@ -1498,7 +1498,7 @@ define(
       var N = {
         record: record, search: search, query: query, log: log, file: file, url: url, runtime: runtime,
         format: format, email: email, render: render, task: task, workflow: workflow,
-        https: https, http: http, encode: encode, nsError: nsError, xml: xml,
+        https: https, http: http, encode: encode, nsError: nsError, xml: xml, crypto: crypto,
         currency: currency, transaction: transaction, redirect: redirect,
         context: context
       };

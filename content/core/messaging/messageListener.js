@@ -357,6 +357,76 @@ export const setupMessageListener = () => {
       return true;
     }
 
+    const getBundleDetailsUrl = (domain, bundleId) => {
+      const accountDomain = (domain ?? "").split(".")[0] ?? "";
+      const sourceCompanyId = accountDomain.replace(/-/g, "_").toUpperCase();
+      const url = new URL(`https://${domain}/app/bundler/bundledetails.nl`);
+      url.searchParams.set("selectedtab", "tab");
+      url.searchParams.set("id", String(bundleId));
+      url.searchParams.set("sourcecompanyid", sourceCompanyId);
+      url.searchParams.set(
+        "domain",
+        String(domain).toLowerCase().includes("-sb") ? "SANDBOX" : "PRODUCTION"
+      );
+      url.searchParams.set("loadsuiteappdata", "T");
+      url.searchParams.set("whence", "");
+      return url.toString();
+    };
+
+    if (action === "CHECK_BUNDLE_SDF_CONVERSION") {
+      const { domain, bundleId } = data ?? {};
+      const detailsUrl = getBundleDetailsUrl(domain, bundleId);
+
+      fetch(detailsUrl, { credentials: "include" })
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status} checking SDF conversion status`);
+          return r.text();
+        })
+        .then(html => {
+          const openingTag = (html.match(/<button\b[^>]*>/gi) ?? []).find(tag =>
+            /\bid\s*=\s*(["'])converttoacp\1/i.test(tag)
+          );
+          const buttonFound = Boolean(openingTag);
+          const disabled = openingTag
+            ? /\sdisabled(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?(?=\s|>)/i.test(openingTag)
+            : false;
+          sendResponse({
+            status: "ok",
+            message: {
+              buttonFound,
+              disabled,
+              canConvert: buttonFound && !disabled,
+              inProgress: buttonFound && disabled,
+              detailsUrl,
+            },
+          });
+        })
+        .catch(e => sendResponse({ status: "error", message: String(e?.message ?? e) }));
+      return true;
+    }
+
+    if (action === "START_BUNDLE_SDF_CONVERSION") {
+      const { domain, bundleId, detailsUrl: suppliedDetailsUrl } = data ?? {};
+      const detailsUrl = suppliedDetailsUrl || getBundleDetailsUrl(domain, bundleId);
+      const conversionUrl = new URL(
+        `https://${domain}/app/suiteapp/bundlesuiteappconvert/convert.nl`
+      );
+      conversionUrl.searchParams.set("bundleid", String(bundleId));
+
+      fetch(conversionUrl, {
+        method: "GET",
+        credentials: "include",
+        referrer: detailsUrl,
+        referrerPolicy: "strict-origin-when-cross-origin",
+      })
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status} starting SDF conversion`);
+          sendResponse({ status: "ok", message: { started: true } });
+        })
+        .catch(e => sendResponse({ status: "error", message: String(e?.message ?? e) }));
+      return true;
+    }
+
     const handler = new NormalRequestHandler(requestId, sendResponse);
     requestManager.addRequest(requestId, handler);
     handler.start();
