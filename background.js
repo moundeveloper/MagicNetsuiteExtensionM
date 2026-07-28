@@ -30,6 +30,16 @@ const DASHBOARD_TAB_TITLE = "Magic NetSuite";
 const DASHBOARD_ENABLER_TAB_TITLE = "Magic NetSuite · NetSuite Worker";
 const DASHBOARD_GROUP_TITLE = "Magic NetSuite";
 const TAB_GROUP_ID_NONE = chrome.tabGroups?.TAB_GROUP_ID_NONE ?? -1;
+const TEMPLATE_REVIEW_STATE_KEY = "magic_netsuite_template_review_state";
+const TEMPLATE_REVIEW_PENDING_STATUSES = new Set([
+  "html_review",
+  "html_changes_requested",
+  "html_approved",
+  "converting",
+  "freemarker_review",
+  "freemarker_changes_requested",
+  "render_error"
+]);
 
 const chromeCallback = (invoke) =>
   new Promise((resolve, reject) => {
@@ -67,6 +77,1022 @@ const dashboardTabGroupsUpdate = (groupId, updateProperties) =>
   );
 const dashboardWindowsUpdate = (windowId, updateInfo) =>
   chromeCallback((done) => chrome.windows.update(windowId, updateInfo, done));
+
+const delay = (milliseconds) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const makeTemplateReviewId = () =>
+  `review_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+const defaultTemplateReviewState = () => ({
+  reviewId: makeTemplateReviewId(),
+  title: "NetSuite Template Review",
+  templateFile: "invoice_template.ftl",
+  recordType: "invoice",
+  recordId: "",
+  recordTypeOptions: ["invoice"],
+  recordIdOptions: [],
+  recordTypeLabels: { invoice: "Invoice" },
+  recordIdLabels: {},
+  html: "",
+  freemarker: "",
+  pdfDataUrl: "",
+  renderError: "",
+  sessionId: "",
+  referenceImageDataUrl: "",
+  referenceImageUrl: "",
+  feedback: "",
+  comments: [],
+  status: "html_review",
+  version: 0,
+  renderedVersion: 0,
+  updatedAt: new Date().toISOString()
+});
+
+const normalizeTemplateReviewState = (value) => {
+  if (!value || typeof value !== "object") return null;
+  const base = defaultTemplateReviewState();
+  return {
+    ...base,
+    ...value,
+    reviewId: String(value.reviewId || base.reviewId),
+    title: String(value.title || base.title),
+    templateFile: String(value.templateFile || base.templateFile),
+    recordType: String(value.recordType || base.recordType),
+    recordId: String(value.recordId || ""),
+    recordTypeOptions: Array.isArray(value.recordTypeOptions)
+      ? value.recordTypeOptions.filter((entry) => typeof entry === "string")
+      : base.recordTypeOptions,
+    recordIdOptions: Array.isArray(value.recordIdOptions)
+      ? value.recordIdOptions.filter((entry) => typeof entry === "string")
+      : [],
+    recordTypeLabels:
+      value.recordTypeLabels && typeof value.recordTypeLabels === "object"
+        ? value.recordTypeLabels
+        : {},
+    recordIdLabels:
+      value.recordIdLabels && typeof value.recordIdLabels === "object"
+        ? value.recordIdLabels
+        : {},
+    comments: Array.isArray(value.comments) ? value.comments : [],
+    version: Number(value.version) || 0,
+    renderedVersion: Number(value.renderedVersion) || 0,
+    updatedAt: String(value.updatedAt || base.updatedAt)
+  };
+};
+
+async function getTemplateReviewState() {
+  const stored = await chrome.storage.local.get(TEMPLATE_REVIEW_STATE_KEY);
+  return normalizeTemplateReviewState(stored[TEMPLATE_REVIEW_STATE_KEY]);
+}
+
+async function saveTemplateReviewState(state, { notify = true } = {}) {
+  const normalized = normalizeTemplateReviewState(state);
+  if (!normalized) throw new Error("Template review state is invalid.");
+  await chrome.storage.local.set({ [TEMPLATE_REVIEW_STATE_KEY]: normalized });
+  if (notify) {
+    chrome.runtime
+      .sendMessage({
+        type: "TEMPLATE_REVIEW_STATE_CHANGED",
+        reviewId: normalized.reviewId,
+        version: normalized.version
+      })
+      .catch(() => undefined);
+  }
+  return normalized;
+}
+
+async function updateTemplateReviewState(patch, { increment = true } = {}) {
+  const current = (await getTemplateReviewState()) || defaultTemplateReviewState();
+  const cleanPatch = Object.fromEntries(
+    Object.entries(patch || {}).filter(([, value]) => value !== undefined)
+  );
+  return saveTemplateReviewState({
+    ...current,
+    ...cleanPatch,
+    version: increment ? current.version + 1 : current.version,
+    updatedAt: increment ? new Date().toISOString() : current.updatedAt
+  });
+}
+
+const templateReviewTabUrl = (reviewId) => {
+  const url = new URL(chrome.runtime.getURL("dist/vue-ui/index.html"));
+  url.searchParams.set("magicTemplateReview", reviewId);
+  url.searchParams.set("initialRoute", `/template-review/${reviewId}`);
+  return url.href;
+};
+
+async function findTemplateReviewTab(reviewId = "") {
+  const tabs = await dashboardTabsQuery({
+    url: `${chrome.runtime.getURL("dist/vue-ui/index.html")}*`
+  });
+  return (
+    tabs.find((tab) => {
+      try {
+        const value = new URL(tab.url || tab.pendingUrl || "").searchParams.get(
+          "magicTemplateReview"
+        );
+        return value && (!reviewId || value === reviewId);
+      } catch {
+        return false;
+      }
+    }) || null
+  );
+}
+
+async function ensureTemplateReviewTab(reviewId, { active = true } = {}) {
+  let tab = await findTemplateReviewTab(reviewId);
+  const url = templateReviewTabUrl(reviewId);
+  if (!tab) {
+    const existing = await findTemplateReviewTab();
+    if (existing?.id) {
+      tab = await dashboardTabsUpdate(existing.id, { url, active });
+    } else {
+      tab = await dashboardTabsCreate({ url, active });
+    }
+  } else if (active && tab.id) {
+    tab = await dashboardTabsUpdate(tab.id, { active: true });
+  }
+  if (!tab?.id) throw new Error("Could not open the template review tab.");
+  await dashboardTabsUpdate(tab.id, { autoDiscardable: false }).catch(
+    () => undefined
+  );
+  await waitForTabComplete(tab.id, 12000).catch(() => undefined);
+  return (await dashboardTabsGet(tab.id).catch(() => tab)) || tab;
+}
+
+async function waitForTemplateReviewRendered(reviewId, version, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await getTemplateReviewState();
+    if (
+      state?.reviewId === reviewId &&
+      Number(state.renderedVersion) >= Number(version)
+    ) {
+      return state;
+    }
+    await delay(100);
+  }
+  return state;
+}
+
+async function captureTemplateReviewTab(tab) {
+  if (!tab?.id) return "";
+  const activeTabs = tab.windowId
+    ? await dashboardTabsQuery({ active: true, windowId: tab.windowId })
+    : [];
+  const previous = activeTabs[0];
+  if (tab.windowId) {
+    await dashboardWindowsUpdate(tab.windowId, { focused: true }).catch(
+      () => undefined
+    );
+  }
+  await dashboardTabsUpdate(tab.id, { active: true });
+  await delay(150);
+  const dataUrl = await chromeCallback((done) =>
+    chrome.tabs.captureVisibleTab(
+      tab.windowId,
+      { format: "jpeg", quality: 82 },
+      done
+    )
+  );
+  if (previous?.id && previous.id !== tab.id) {
+    await dashboardTabsUpdate(previous.id, { active: true }).catch(
+      () => undefined
+    );
+  }
+  return String(dataUrl || "").replace(/^data:image\/jpeg;base64,/, "");
+}
+
+const templateReviewToolResult = (state, screenshot = "") => {
+  const content = [
+    {
+      type: "text",
+      text: JSON.stringify(
+        {
+          ...state,
+          pending: TEMPLATE_REVIEW_PENDING_STATUSES.has(state.status)
+        },
+        null,
+        2
+      )
+    }
+  ];
+  if (screenshot) {
+    content.push({ type: "image", data: screenshot, mimeType: "image/jpeg" });
+  }
+  return { content };
+};
+
+async function handleTemplateReviewSurfaceOpen(args) {
+  const current = await getTemplateReviewState();
+  const isRetry =
+    current &&
+    TEMPLATE_REVIEW_PENDING_STATUSES.has(current.status) &&
+    current.html === String(args.html || "") &&
+    current.title === String(args.title || "NetSuite Template Review");
+  const base = isRetry ? current : defaultTemplateReviewState();
+  const state = await saveTemplateReviewState({
+    ...base,
+    ...args,
+    reviewId: isRetry ? current.reviewId : makeTemplateReviewId(),
+    title: String(args.title || "NetSuite Template Review"),
+    templateFile: String(args.templateFile || "invoice_template.ftl"),
+    recordType: String(args.recordType || "invoice"),
+    recordId: String(args.recordId || ""),
+    recordTypeOptions:
+      Array.isArray(args.recordTypeOptions) && args.recordTypeOptions.length
+        ? args.recordTypeOptions
+        : [String(args.recordType || "invoice")],
+    recordIdOptions: Array.isArray(args.recordIdOptions)
+      ? args.recordIdOptions
+      : [],
+    recordTypeLabels:
+      args.recordTypeLabels && typeof args.recordTypeLabels === "object"
+        ? args.recordTypeLabels
+        : {},
+    recordIdLabels:
+      args.recordIdLabels && typeof args.recordIdLabels === "object"
+        ? args.recordIdLabels
+        : {},
+    html: String(args.html || ""),
+    freemarker: String(args.freemarker || ""),
+    pdfDataUrl: String(args.pdfDataUrl || ""),
+    renderError: "",
+    sessionId: String(args.sessionId || ""),
+    referenceImageDataUrl: String(args.referenceImageDataUrl || ""),
+    referenceImageUrl: String(args.referenceImageUrl || ""),
+    feedback: "",
+    comments: isRetry ? current.comments : [],
+    status: isRetry ? current.status : "html_review",
+    version: isRetry ? current.version + 1 : 1,
+    renderedVersion: 0,
+    updatedAt: new Date().toISOString()
+  });
+  const tab = await ensureTemplateReviewTab(state.reviewId, { active: true });
+  const rendered = (await waitForTemplateReviewRendered(
+    state.reviewId,
+    state.version
+  )) || state;
+  return templateReviewToolResult(
+    rendered,
+    await captureTemplateReviewTab(tab).catch(() => "")
+  );
+}
+
+async function handleTemplateReviewSurfaceUpdate(args) {
+  const current = await getTemplateReviewState();
+  if (!current) throw new Error("No template review is open.");
+  const state = await updateTemplateReviewState(args);
+  const tab = await ensureTemplateReviewTab(state.reviewId, { active: false });
+  const rendered = (await waitForTemplateReviewRendered(
+    state.reviewId,
+    state.version
+  )) || state;
+  return templateReviewToolResult(
+    rendered,
+    await captureTemplateReviewTab(tab).catch(() => "")
+  );
+}
+
+async function handleTemplateReviewSurfaceGet() {
+  const state = await getTemplateReviewState();
+  if (!state) throw new Error("No template review is open.");
+  return templateReviewToolResult(state);
+}
+
+async function handleTemplateReviewSurfaceScreenshot() {
+  const state = await getTemplateReviewState();
+  if (!state) throw new Error("No template review is open.");
+  const tab = await ensureTemplateReviewTab(state.reviewId, { active: false });
+  await waitForTemplateReviewRendered(state.reviewId, state.version);
+  return templateReviewToolResult(
+    state,
+    await captureTemplateReviewTab(tab).catch(() => "")
+  );
+}
+
+const TEMPLATE_DESIGN_SESSION_STORE_KEY =
+  "magic_netsuite_template_design_sessions_v1";
+const TEMPLATE_STUDIO_VIEW_STATE_KEY =
+  "magic_netsuite_template_studio_view_state";
+const TEMPLATE_STUDIO_CAPTURE_REQUEST_KEY =
+  "magic_netsuite_template_studio_capture_request";
+const TEMPLATE_STUDIO_CAPTURE_RESPONSE_KEY =
+  "magic_netsuite_template_studio_capture_response";
+const MAX_TEMPLATE_SESSION_REVISIONS = 30;
+
+const defaultTemplateDesignSessionStore = () => ({
+  schemaVersion: 1,
+  currentSessionId: "",
+  sessions: [],
+  updatedAt: new Date().toISOString()
+});
+
+const normalizeTemplateDesignSession = (value = {}) => ({
+  id: String(value.id || ""),
+  name: String(value.name || "Untitled template"),
+  prompt: String(value.prompt || ""),
+  referenceImages: Array.isArray(value.referenceImages)
+    ? value.referenceImages.filter(
+        (image) =>
+          image &&
+          typeof image === "object" &&
+          image.id &&
+          image.dataUrl
+      )
+    : [],
+  contextMode:
+    value.contextMode === "transaction" ||
+    value.contextMode === "customrecord"
+      ? value.contextMode
+      : "freestyle",
+  recordType: String(value.recordType || ""),
+  recordId: String(value.recordId || ""),
+  recordLabel: String(value.recordLabel || ""),
+  accountId: String(value.accountId || ""),
+  freemarker: String(value.freemarker || ""),
+  pdfDataUrl: String(value.pdfDataUrl || ""),
+  renderError: String(value.renderError || ""),
+  feedback: Array.isArray(value.feedback)
+    ? value.feedback
+        .filter((feedback) => feedback?.id && feedback?.text)
+        .map((feedback) => ({
+          ...feedback,
+          status: feedback.status === "addressed" ? "addressed" : "open",
+          checked: Boolean(feedback.checked),
+          ...(feedback.checked
+            ? {
+                checkedAt: String(
+                  feedback.checkedAt ||
+                    feedback.addressedAt ||
+                    new Date().toISOString()
+                )
+              }
+            : { checkedAt: undefined })
+        }))
+    : [],
+  revisions: Array.isArray(value.revisions)
+    ? value.revisions.slice(0, MAX_TEMPLATE_SESSION_REVISIONS)
+    : [],
+  status: String(value.status || "brief_ready"),
+  version: Number(value.version) || 1,
+  sourceVersion:
+    Number(value.sourceVersion) || (String(value.freemarker || "") ? 1 : 0),
+  renderVersion: Number(value.renderVersion) || 0,
+  createdAt: String(value.createdAt || new Date().toISOString()),
+  updatedAt: String(value.updatedAt || new Date().toISOString()),
+  lastRenderedAt: String(value.lastRenderedAt || "")
+});
+
+const normalizeTemplateDesignSessionStore = (value) => {
+  if (!value || typeof value !== "object") {
+    return defaultTemplateDesignSessionStore();
+  }
+  const sessions = Array.isArray(value.sessions)
+    ? value.sessions
+        .map(normalizeTemplateDesignSession)
+        .filter((session) => session.id)
+    : [];
+  const requestedCurrent = String(value.currentSessionId || "");
+  return {
+    schemaVersion: 1,
+    currentSessionId: sessions.some(
+      (session) => session.id === requestedCurrent
+    )
+      ? requestedCurrent
+      : sessions[0]?.id || "",
+    sessions,
+    updatedAt: String(value.updatedAt || new Date().toISOString())
+  };
+};
+
+async function getTemplateDesignSessionStore() {
+  const result = await chrome.storage.local.get(
+    TEMPLATE_DESIGN_SESSION_STORE_KEY
+  );
+  return normalizeTemplateDesignSessionStore(
+    result[TEMPLATE_DESIGN_SESSION_STORE_KEY]
+  );
+}
+
+async function saveTemplateDesignSessionStore(store) {
+  const normalized = normalizeTemplateDesignSessionStore({
+    ...store,
+    updatedAt: new Date().toISOString()
+  });
+  await chrome.storage.local.set({
+    [TEMPLATE_DESIGN_SESSION_STORE_KEY]: normalized
+  });
+  return normalized;
+}
+
+function getTemplateDesignSessionFromStore(store, sessionId = "") {
+  const requestedId = String(sessionId || store.currentSessionId || "");
+  const session = store.sessions.find((entry) => entry.id === requestedId);
+  if (!session) {
+    throw new Error(
+      "No current Template Studio session exists. Commit one from the dashboard first."
+    );
+  }
+  return session;
+}
+
+const templateDesignSessionSummary = (
+  session,
+  { includeFreemarker = true, includeFeedbackHistory = false } = {}
+) => {
+  const activeFeedback = session.feedback.filter(
+    (feedback) => !feedback?.checked
+  );
+  return {
+  id: session.id,
+  name: session.name,
+  prompt: session.prompt,
+  references: session.referenceImages.map((image) => ({
+    id: image.id,
+    name: image.name,
+    mimeType: image.mimeType,
+    createdAt: image.createdAt
+  })),
+  contextMode: session.contextMode,
+  recordType: session.recordType,
+  recordId: session.recordId,
+  recordLabel: session.recordLabel,
+  accountId: session.accountId,
+  ...(includeFreemarker ? { freemarker: session.freemarker } : {}),
+  pdfReady: Boolean(session.pdfDataUrl),
+  renderError: session.renderError,
+  feedback: includeFeedbackHistory ? session.feedback : activeFeedback,
+  openFeedback: activeFeedback.filter(
+    (feedback) => feedback?.status === "open"
+  ),
+  addressedFeedback: activeFeedback.filter(
+    (feedback) => feedback?.status === "addressed"
+  ),
+  ...(includeFeedbackHistory
+    ? {
+        checkedFeedback: session.feedback.filter(
+          (feedback) => feedback?.checked
+        )
+      }
+    : {}),
+  revisions: session.revisions.map((revision) => ({
+    id: revision.id,
+    actor: revision.actor,
+    summary: revision.summary,
+    createdAt: revision.createdAt
+  })),
+  status: session.status,
+  version: session.version,
+  sourceVersion: session.sourceVersion,
+  renderVersion: session.renderVersion,
+  createdAt: session.createdAt,
+  updatedAt: session.updatedAt,
+  lastRenderedAt: session.lastRenderedAt
+  };
+};
+
+function appendTemplateReferenceImages(content, session) {
+  for (const reference of session.referenceImages) {
+    const match = String(reference.dataUrl || "").match(
+      /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i
+    );
+    if (!match) continue;
+    content.push({
+      type: "image",
+      data: match[2],
+      mimeType: match[1]
+    });
+  }
+}
+
+function templateDesignSessionToolResult(
+  session,
+  {
+    includeReferences = false,
+    includeFreemarker = false,
+    includeFeedbackHistory = false,
+    screenshot = "",
+    metadata = {}
+  } = {}
+) {
+  const content = [
+    {
+      type: "text",
+      text: JSON.stringify(
+        {
+          ...templateDesignSessionSummary(session, {
+            includeFreemarker,
+            includeFeedbackHistory
+          }),
+          ...metadata
+        },
+        null,
+        2
+      )
+    }
+  ];
+  if (includeReferences) appendTemplateReferenceImages(content, session);
+  if (screenshot) {
+    content.push({
+      type: "image",
+      data: screenshot,
+      mimeType: "image/jpeg"
+    });
+  }
+  return { content };
+}
+
+async function handleTemplateDesignSessionList() {
+  const store = await getTemplateDesignSessionStore();
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            currentSessionId: store.currentSessionId,
+            sessions: store.sessions.map((session) =>
+              templateDesignSessionSummary(session, {
+                includeFreemarker: false
+              })
+            )
+          },
+          null,
+          2
+        )
+      }
+    ]
+  };
+}
+
+async function handleTemplateDesignSessionGetCurrent(args = {}) {
+  const store = await getTemplateDesignSessionStore();
+  const session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  return templateDesignSessionToolResult(session, {
+    includeReferences: args.includeReferences !== false,
+    includeFreemarker: args.includeFreemarker === true,
+    includeFeedbackHistory: args.includeFeedbackHistory === true
+  });
+}
+
+async function handleTemplateDesignSessionSetCurrent(args = {}) {
+  const store = await getTemplateDesignSessionStore();
+  const session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  store.currentSessionId = session.id;
+  await saveTemplateDesignSessionStore(store);
+  return templateDesignSessionToolResult(session);
+}
+
+const makeTemplateDesignRevision = (
+  freemarker,
+  summary,
+  actor = "assistant"
+) => ({
+  id: `revision_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+  actor,
+  summary: String(summary || "Updated FreeMarker design"),
+  freemarker,
+  createdAt: new Date().toISOString()
+});
+
+async function updateTemplateDesignSession(args = {}) {
+  const store = await getTemplateDesignSessionStore();
+  const session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  const index = store.sessions.findIndex((entry) => entry.id === session.id);
+  const nextFreemarker =
+    args.freemarker === undefined
+      ? session.freemarker
+      : String(args.freemarker || "");
+  const freemarkerChanged =
+    args.freemarker !== undefined && nextFreemarker !== session.freemarker;
+  const addressedIds = new Set(
+    Array.isArray(args.addressFeedbackIds)
+      ? args.addressFeedbackIds.map(String)
+      : []
+  );
+  const response = String(args.changeSummary || "").trim();
+  const next = normalizeTemplateDesignSession({
+    ...session,
+    ...(args.name !== undefined ? { name: String(args.name || "") } : {}),
+    ...(args.prompt !== undefined
+      ? { prompt: String(args.prompt || "") }
+      : {}),
+    ...(args.contextMode !== undefined
+      ? { contextMode: String(args.contextMode || "freestyle") }
+      : {}),
+    ...(args.recordType !== undefined
+      ? { recordType: String(args.recordType || "") }
+      : {}),
+    ...(args.recordId !== undefined
+      ? { recordId: String(args.recordId || "") }
+      : {}),
+    ...(args.recordLabel !== undefined
+      ? { recordLabel: String(args.recordLabel || "") }
+      : {}),
+    ...(args.accountId !== undefined
+      ? { accountId: String(args.accountId || "") }
+      : {}),
+    freemarker: nextFreemarker,
+    pdfDataUrl: freemarkerChanged ? "" : session.pdfDataUrl,
+    renderError: freemarkerChanged ? "" : session.renderError,
+    feedback: session.feedback.map((feedback) =>
+      addressedIds.has(String(feedback?.id))
+        ? {
+            ...feedback,
+            status: "addressed",
+            addressedAt: new Date().toISOString(),
+            ...(response ? { response } : {})
+          }
+        : feedback
+    ),
+    revisions: freemarkerChanged
+      ? [
+          makeTemplateDesignRevision(
+            nextFreemarker,
+            response || "Updated FreeMarker design"
+          ),
+          ...session.revisions
+        ].slice(0, MAX_TEMPLATE_SESSION_REVISIONS)
+      : session.revisions,
+    status: String(
+      args.status || (freemarkerChanged ? "designing" : session.status)
+    ),
+    sourceVersion: freemarkerChanged
+      ? session.sourceVersion + 1
+      : session.sourceVersion,
+    version: session.version + 1,
+    updatedAt: new Date().toISOString()
+  });
+  store.sessions[index] = next;
+  if (args.makeCurrent !== false) store.currentSessionId = next.id;
+  await saveTemplateDesignSessionStore(store);
+  return next;
+}
+
+const templateSourceLines = (freemarker) =>
+  String(freemarker || "").replace(/\r\n/g, "\n").split("\n");
+
+async function handleTemplateDesignSessionRead(args = {}) {
+  const store = await getTemplateDesignSessionStore();
+  const session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  const lines = templateSourceLines(session.freemarker);
+  const requestedSearch = String(args.search || "").trim().toLowerCase();
+  const contextLines = Math.min(
+    100,
+    Math.max(0, Number(args.contextLines) || 8)
+  );
+  let startLine = Math.max(1, Number(args.startLine) || 1);
+  let endLine = Math.min(
+    lines.length,
+    Number(args.endLine) || Math.min(lines.length, startLine + 199)
+  );
+  if (requestedSearch) {
+    const matchIndex = lines.findIndex((line) =>
+      line.toLowerCase().includes(requestedSearch)
+    );
+    if (matchIndex < 0) {
+      throw new Error(`Source text was not found: ${args.search}`);
+    }
+    startLine = Math.max(1, matchIndex + 1 - contextLines);
+    endLine = Math.min(lines.length, matchIndex + 1 + contextLines);
+  }
+  if (endLine < startLine) endLine = startLine;
+  const source = lines
+    .slice(startLine - 1, endLine)
+    .map(
+      (line, index) =>
+        `${String(startLine + index).padStart(5, " ")} | ${line}`
+    )
+    .join("\n");
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            sessionId: session.id,
+            sourceVersion: session.sourceVersion,
+            totalLines: lines.length,
+            startLine,
+            endLine,
+            source
+          },
+          null,
+          2
+        )
+      }
+    ]
+  };
+}
+
+const replaceTemplateSource = (source, edit, index) => {
+  const oldText = String(edit?.oldText || "");
+  const newText = String(edit?.newText || "");
+  if (!oldText) throw new Error(`Edit ${index + 1} requires oldText.`);
+  const occurrences = source.split(oldText).length - 1;
+  if (occurrences === 0) {
+    throw new Error(`Edit ${index + 1} oldText was not found.`);
+  }
+  if (occurrences > 1 && edit?.all !== true) {
+    throw new Error(
+      `Edit ${index + 1} matched ${occurrences} locations. Add more context or set all:true.`
+    );
+  }
+  return edit?.all === true
+    ? source.split(oldText).join(newText)
+    : source.replace(oldText, newText);
+};
+
+async function handleTemplateDesignSessionPatch(args = {}) {
+  const store = await getTemplateDesignSessionStore();
+  const session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  const expectedSourceVersion = Number(args.expectedSourceVersion);
+  if (
+    !Number.isFinite(expectedSourceVersion) ||
+    expectedSourceVersion !== session.sourceVersion
+  ) {
+    throw new Error(
+      `FreeMarker source changed. Expected sourceVersion ${args.expectedSourceVersion}, current is ${session.sourceVersion}. Read the affected section again before patching.`
+    );
+  }
+  const edits = Array.isArray(args.edits) ? args.edits.slice(0, 20) : [];
+  if (!edits.length) throw new Error("At least one source edit is required.");
+  const patched = edits.reduce(replaceTemplateSource, session.freemarker);
+  if (patched === session.freemarker) {
+    throw new Error("The source patch did not change the FreeMarker document.");
+  }
+  const updated = await updateTemplateDesignSession({
+    sessionId: session.id,
+    freemarker: patched,
+    changeSummary:
+      String(args.changeSummary || "").trim() ||
+      `Applied ${edits.length} incremental source edit${edits.length === 1 ? "" : "s"}.`,
+    addressFeedbackIds: args.addressFeedbackIds
+  });
+  if (args.render === true) {
+    return handleTemplateDesignSessionRender({
+      sessionId: updated.id,
+      screenshot: args.screenshot === true,
+      screenshotPage: args.screenshotPage,
+      screenshotWidth: args.screenshotWidth
+    });
+  }
+  return templateDesignSessionToolResult(updated, {
+    metadata: { editsApplied: edits.length }
+  });
+}
+
+async function handleTemplateDesignSessionUpdate(args = {}) {
+  const session = await updateTemplateDesignSession(args);
+  if (args.render === true) {
+    return handleTemplateDesignSessionRender({
+      sessionId: session.id,
+      screenshot: args.screenshot === true,
+      screenshotPage: args.screenshotPage,
+      screenshotWidth: args.screenshotWidth
+    });
+  }
+  return templateDesignSessionToolResult(session);
+}
+
+async function renderTemplateDesignSession(args = {}) {
+  let store = await getTemplateDesignSessionStore();
+  let session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  if (!session.freemarker.trim()) {
+    throw new Error(
+      "The current Template Studio session does not have a FreeMarker design yet."
+    );
+  }
+  if (
+    session.contextMode !== "freestyle" &&
+    (!session.recordType || !session.recordId)
+  ) {
+    throw new Error(
+      "Select a NetSuite record type and record in Template Studio before rendering."
+    );
+  }
+
+  let index = store.sessions.findIndex((entry) => entry.id === session.id);
+  session = normalizeTemplateDesignSession({
+    ...session,
+    status: "rendering",
+    renderError: "",
+    version: session.version + 1,
+    updatedAt: new Date().toISOString()
+  });
+  store.sessions[index] = session;
+  await saveTemplateDesignSessionStore(store);
+
+  try {
+    const result = await callNetsuiteRoute(
+      "RENDER_FREEMARKER_TEMPLATE",
+      {
+        template: session.freemarker,
+        recordType:
+          session.contextMode === "freestyle"
+            ? undefined
+            : session.recordType,
+        recordId:
+          session.contextMode === "freestyle" ? undefined : session.recordId
+      },
+      "Failed to render the Template Studio FreeMarker design."
+    );
+    const rendered = templateReviewPdfFromRenderResult(result);
+    if (rendered.renderError) throw new Error(rendered.renderError);
+    store = await getTemplateDesignSessionStore();
+    session = getTemplateDesignSessionFromStore(store, session.id);
+    index = store.sessions.findIndex((entry) => entry.id === session.id);
+    session = normalizeTemplateDesignSession({
+      ...session,
+      pdfDataUrl: rendered.pdfDataUrl,
+      renderError: "",
+      status: "rendered",
+      renderVersion: session.renderVersion + 1,
+      version: session.version + 1,
+      lastRenderedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    store.sessions[index] = session;
+    await saveTemplateDesignSessionStore(store);
+    return session;
+  } catch (error) {
+    store = await getTemplateDesignSessionStore();
+    session = getTemplateDesignSessionFromStore(store, session.id);
+    index = store.sessions.findIndex((entry) => entry.id === session.id);
+    session = normalizeTemplateDesignSession({
+      ...session,
+      pdfDataUrl: "",
+      renderError: error instanceof Error ? error.message : String(error),
+      status: "render_error",
+      renderVersion: session.renderVersion + 1,
+      version: session.version + 1,
+      lastRenderedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    store.sessions[index] = session;
+    await saveTemplateDesignSessionStore(store);
+    return session;
+  }
+}
+
+async function openTemplateStudioInDashboard(session) {
+  const live = await getLiveDashboardPreviewSession();
+  const embeddedDashboardTab = live?.dashboardTab?.id
+    ? null
+    : await findVisibleEmbeddedDashboardTab();
+  const dashboardTab = live?.dashboardTab || embeddedDashboardTab;
+  if (!dashboardTab?.id) {
+    throw new Error(
+      "Open the Magic NetSuite dashboard or its in-page workspace before requesting a Template Studio screenshot."
+    );
+  }
+  if (live?.dashboardTab?.id) {
+    await focusDashboardPreviewSession(live);
+  } else {
+    if (dashboardTab.windowId) {
+      await dashboardWindowsUpdate(dashboardTab.windowId, { focused: true })
+        .catch(() => undefined);
+    }
+    await dashboardTabsUpdate(dashboardTab.id, { active: true });
+  }
+  await chrome.storage.local.remove(TEMPLATE_STUDIO_VIEW_STATE_KEY);
+  await chrome.runtime
+    .sendMessage({
+      type: "OPEN_TEMPLATE_STUDIO",
+      sessionId: session.id
+    })
+    .catch(() => undefined);
+
+  const deadline = Date.now() + 10000;
+  let readyView = null;
+  while (Date.now() < deadline) {
+    const result = await chrome.storage.local.get(
+      TEMPLATE_STUDIO_VIEW_STATE_KEY
+    );
+    const view = result[TEMPLATE_STUDIO_VIEW_STATE_KEY];
+    if (
+      view?.sessionId === session.id &&
+      Number(view.renderVersion || 0) >= Number(session.renderVersion || 0)
+    ) {
+      readyView = view;
+      break;
+    }
+    await delay(100);
+  }
+  await delay(200);
+  if (!readyView) {
+    throw new Error(
+      "Template Studio did not finish loading the generated PDF. Keep the dashboard open and retry."
+    );
+  }
+  return readyView;
+}
+
+async function renderTemplatePdfPage(session, args = {}) {
+  const page = args.page === undefined ? 1 : Number(args.page);
+  if (!Number.isInteger(page) || page < 1) {
+    throw new Error("PDF page must be a positive one-based integer.");
+  }
+  const targetWidth = Math.min(
+    2400,
+    Math.max(800, Math.trunc(Number(args.targetWidth) || 1600))
+  );
+  await openTemplateStudioInDashboard(session);
+  const requestId = `pdf_capture_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 9)}`;
+  await chrome.storage.local.remove(TEMPLATE_STUDIO_CAPTURE_RESPONSE_KEY);
+  await chrome.storage.local.set({
+    [TEMPLATE_STUDIO_CAPTURE_REQUEST_KEY]: {
+      requestId,
+      sessionId: session.id,
+      renderVersion: session.renderVersion,
+      page,
+      targetWidth
+    }
+  });
+
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const stored = await chrome.storage.local.get(
+      TEMPLATE_STUDIO_CAPTURE_RESPONSE_KEY
+    );
+    const response = stored[TEMPLATE_STUDIO_CAPTURE_RESPONSE_KEY];
+    if (response?.requestId === requestId) {
+      if (response.error) throw new Error(response.error);
+      if (!response.imageBase64) {
+        throw new Error("Template Studio returned an empty PDF page image.");
+      }
+      return response;
+    }
+    await delay(100);
+  }
+  throw new Error(
+    "Template Studio did not finish rasterizing the requested PDF page."
+  );
+}
+
+async function handleTemplateDesignSessionScreenshot(args = {}) {
+  const store = await getTemplateDesignSessionStore();
+  let session = getTemplateDesignSessionFromStore(store, args.sessionId);
+  if (args.render === true) {
+    session = await renderTemplateDesignSession({ sessionId: session.id });
+  }
+  if (!session.pdfDataUrl) {
+    if (session.renderError) return templateDesignSessionToolResult(session);
+    throw new Error("Render the current FreeMarker session before capturing its PDF.");
+  }
+  const capture = await renderTemplatePdfPage(session, args);
+  return templateDesignSessionToolResult(session, {
+    screenshot: capture.imageBase64,
+    metadata: {
+      screenshotPage: capture.page,
+      pdfPageCount: capture.pageCount,
+      screenshotWidth: capture.width,
+      screenshotHeight: capture.height
+    }
+  });
+}
+
+async function handleTemplateDesignSessionRender(args = {}) {
+  const session = await renderTemplateDesignSession(args);
+  if (args.screenshot === true) {
+    return handleTemplateDesignSessionScreenshot({
+      sessionId: session.id,
+      render: false,
+      page: args.screenshotPage,
+      targetWidth: args.screenshotWidth
+    });
+  }
+  return templateDesignSessionToolResult(session);
+}
+
+const handleTemplateDesignSessionRenderMessage = ({
+  message,
+  sendResponse
+}) => {
+  (async () => {
+    try {
+      const session = await renderTemplateDesignSession({
+        sessionId: message.sessionId
+      });
+      sendResponse({
+        ok: session.status === "rendered",
+        error: session.renderError || "",
+        session: templateDesignSessionSummary(session)
+      });
+    } catch (error) {
+      sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
+  return true;
+};
 
 // ── Download Analyzer ────────────────────────────────────────────────────────
 // Listeners remain registered so MV3 can wake the service worker, but they only
@@ -664,7 +1690,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     DOWNLOAD_ANALYZER_GET_STATE: handleDownloadAnalyzerGetState,
     DOWNLOAD_ANALYZER_SET_ENABLED: handleDownloadAnalyzerSetEnabled,
     DOWNLOAD_ANALYZER_CLEAR: handleDownloadAnalyzerClear,
-    DOWNLOAD_FILE_CABINET_FILE: handleDownloadFileCabinetFile
+    DOWNLOAD_FILE_CABINET_FILE: handleDownloadFileCabinetFile,
+    TEMPLATE_DESIGN_SESSION_RENDER: handleTemplateDesignSessionRenderMessage,
+    ENSURE_RECORD_BINDING_SKILL: handleEnsureRecordBindingSkillMessage
   };
 
   const messageHandler = messageMap[message.type];
@@ -1071,6 +2099,41 @@ const focusDashboardPreviewSession = async (liveSession) => {
   if (targetTab?.id) {
     await dashboardTabsUpdate(targetTab.id, { active: true });
   }
+};
+
+const findVisibleEmbeddedDashboardTab = async () => {
+  const tabs = await dashboardTabsQuery({
+    url: ["*://*.app.netsuite.com/*"]
+  });
+  const ordered = [...tabs].sort(
+    (a, b) => Number(b.active) - Number(a.active)
+  );
+  for (const tab of ordered) {
+    if (!tab.id) continue;
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const frame = document.getElementById("magic-netsuite-frame");
+          if (!(frame instanceof HTMLIFrameElement)) return false;
+          const style = window.getComputedStyle(frame);
+          const rect = frame.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.pointerEvents !== "none" &&
+            Number.parseFloat(style.opacity || "1") > 0 &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        }
+      });
+      if (result?.result === true) return tab;
+    } catch {
+      // Restricted or unloading tabs are not dashboard candidates.
+    }
+  }
+  return null;
 };
 
 const decorateDashboardPreviewTab = async (tabId, title) => {
@@ -1705,6 +2768,8 @@ let mcpSuiteletServerUrlCache = null;
 
 const SKILLS_DB_NAME = "MagicNetsuiteSkills";
 const SKILLS_STORE_NAME = "skills";
+const RECORD_BINDING_SKILL_SEED_KEY =
+  "magic_netsuite_record_binding_skill_seed_v1";
 
 function openSkillsDb() {
   return new Promise((resolve, reject) => {
@@ -1762,6 +2827,63 @@ async function getAllStoredSkills() {
   return withSkillsStore("readonly", (store) => requestToPromise(store.getAll()));
 }
 
+async function ensureRecordBindingSkill() {
+  const seedState = await chrome.storage.local.get(
+    RECORD_BINDING_SKILL_SEED_KEY
+  );
+  if (seedState[RECORD_BINDING_SKILL_SEED_KEY]) return null;
+
+  const response = await fetch(
+    chrome.runtime.getURL("skills/bind-freemarker-record.json")
+  );
+  if (!response.ok) {
+    throw new Error("Could not load the bundled record-binding skill.");
+  }
+  const definition = await response.json();
+  const storedSkills = await getAllStoredSkills();
+  const existing = storedSkills.find(
+    (skill) =>
+      String(skill.name || "").toLowerCase() ===
+      String(definition.name || "").toLowerCase()
+  );
+  let skillId = existing?.id || null;
+  if (!existing) {
+    const timestamp = new Date().toISOString();
+    skillId = await withSkillsStore("readwrite", (store) =>
+      requestToPromise(
+        store.add({
+          ...definition,
+          enabled: true,
+          supersedes: [],
+          dependencies: [],
+          lastReviewedAt: timestamp,
+          createdAt: timestamp,
+          updatedAt: timestamp
+        })
+      )
+    );
+  }
+  await chrome.storage.local.set({
+    [RECORD_BINDING_SKILL_SEED_KEY]: {
+      skillId,
+      seededAt: new Date().toISOString()
+    }
+  });
+  return skillId;
+}
+
+function handleEnsureRecordBindingSkillMessage({ sendResponse }) {
+  ensureRecordBindingSkill()
+    .then((skillId) => sendResponse({ ok: true, skillId }))
+    .catch((error) =>
+      sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    );
+  return true;
+}
+
 function normalizeSkillPayload(args) {
   const name = String(args?.name || "").trim();
   const content = String(args?.content || args?.markdown || "").trim();
@@ -1777,28 +2899,98 @@ function normalizeSkillPayload(args) {
       : String(args?.tags || "").trim(),
     content,
     enabled: args?.enabled === undefined ? true : Boolean(args.enabled),
-    domain
+    domain,
+    triggers: String(args?.triggers || "").trim(),
+    status: ["active", "draft", "deprecated"].includes(args?.status)
+      ? args.status
+      : "active",
+    priority: Math.min(100, Math.max(0, Number(args?.priority ?? 50))),
+    source: String(args?.source || "ai_saved"),
+    dependencies: Array.isArray(args?.dependencies)
+      ? [
+          ...new Set(
+            args.dependencies
+              .map(Number)
+              .filter((id) => Number.isInteger(id) && id > 0)
+          )
+        ]
+      : []
   };
 }
 
 async function handleMagicSaveSkill(args) {
   const now = new Date().toISOString();
   const payload = normalizeSkillPayload(args);
+  const dependenciesSpecified = Array.isArray(args?.dependencies);
   const idArg = Number(args?.id);
   const upsertByName = args?.upsertByName !== false;
+  const storedSkills = await getAllStoredSkills();
+  const existing =
+    (Number.isFinite(idArg) && idArg > 0
+      ? storedSkills.find((skill) => Number(skill.id) === idArg)
+      : null) ||
+    (upsertByName
+      ? storedSkills.find(
+          (skill) =>
+            String(skill.name || "").toLowerCase() ===
+            payload.name.toLowerCase()
+        )
+      : null);
+  if (existing?.id) {
+    const preserveWhenOmitted = [
+      "description",
+      "tags",
+      "enabled",
+      "domain",
+      "triggers",
+      "status",
+      "priority",
+      "source"
+    ];
+    for (const field of preserveWhenOmitted) {
+      if (args?.[field] === undefined && existing[field] !== undefined) {
+        payload[field] = existing[field];
+      }
+    }
+    if (!dependenciesSpecified) {
+      payload.dependencies = Array.isArray(existing.dependencies)
+        ? existing.dependencies.map(Number)
+        : [];
+    }
+    payload.dependencies = payload.dependencies.filter(
+      (dependencyId) => dependencyId !== Number(existing.id)
+    );
+    const dependencyMap = new Map(
+      storedSkills.map((skill) => [
+        Number(skill.id),
+        Number(skill.id) === Number(existing.id)
+          ? payload.dependencies
+          : Array.isArray(skill.dependencies)
+            ? skill.dependencies.map(Number)
+            : []
+      ])
+    );
+    const visiting = new Set();
+    const visited = new Set();
+    const hasCycle = (skillId) => {
+      if (visiting.has(skillId)) return true;
+      if (visited.has(skillId)) return false;
+      visiting.add(skillId);
+      for (const dependencyId of dependencyMap.get(skillId) || []) {
+        if (dependencyMap.has(dependencyId) && hasCycle(dependencyId)) {
+          return true;
+        }
+      }
+      visiting.delete(skillId);
+      visited.add(skillId);
+      return false;
+    };
+    if (hasCycle(Number(existing.id))) {
+      throw new Error("Skill dependencies cannot contain a cycle.");
+    }
+  }
 
   const savedId = await withSkillsStore("readwrite", async (store) => {
-    let existing = null;
-    if (Number.isFinite(idArg) && idArg > 0) {
-      existing = await requestToPromise(store.get(idArg));
-    }
-    if (!existing && upsertByName) {
-      const all = await requestToPromise(store.getAll());
-      existing = all.find(
-        (skill) => String(skill.name || "").toLowerCase() === payload.name.toLowerCase()
-      );
-    }
-
     if (existing?.id) {
       await requestToPromise(
         store.put({
@@ -1842,22 +3034,25 @@ async function handleMagicSaveSkill(args) {
 }
 
 async function handleMagicListSkills(args) {
+  await ensureRecordBindingSkill();
   const includeDisabled = args?.includeDisabled !== false;
   const skills = (await getAllStoredSkills())
     .filter((skill) => includeDisabled || skill.enabled !== false)
-    .map(({ id, name, description, tags, enabled, domain, updatedAt }) => ({
+    .map(({ id, name, description, tags, enabled, domain, dependencies, updatedAt }) => ({
       id,
       name,
       description,
       tags,
       enabled: enabled !== false,
       domain: domain || "global",
+      dependencies: Array.isArray(dependencies) ? dependencies : [],
       updatedAt
     }));
   return { content: [{ type: "text", text: JSON.stringify({ skills }, null, 2) }] };
 }
 
 async function handleMagicSearchSkills(args) {
+  await ensureRecordBindingSkill();
   const query = String(args?.query || "").trim().toLowerCase();
   const includeDisabled = Boolean(args?.includeDisabled);
   const terms = query.split(/\s+/).filter(Boolean);
@@ -1878,7 +3073,10 @@ async function handleMagicSearchSkills(args) {
       description: skill.description,
       tags: skill.tags,
       enabled: skill.enabled !== false,
-      domain: skill.domain || "global"
+      domain: skill.domain || "global",
+      dependencies: Array.isArray(skill.dependencies)
+        ? skill.dependencies
+        : []
     }));
 
   return {
@@ -1892,11 +3090,52 @@ async function handleMagicSearchSkills(args) {
 }
 
 async function handleMagicLoadSkill(args) {
+  await ensureRecordBindingSkill();
   const id = Number(args?.id ?? args?.skillId);
   if (!Number.isFinite(id)) throw new Error("Skill id is required.");
-  const skill = await withSkillsStore("readonly", (store) => requestToPromise(store.get(id)));
+  const skills = await getAllStoredSkills();
+  const byId = new Map(skills.map((skill) => [Number(skill.id), skill]));
+  const skill = byId.get(id);
   if (!skill) throw new Error(`Skill with ID ${id} was not found.`);
-  return { content: [{ type: "text", text: JSON.stringify(skill, null, 2) }] };
+  const loaded = new Set([id]);
+  const dependencies = [];
+  const sections = [String(skill.content || "")];
+  const appendDependencies = (parent, depth) => {
+    if (depth > 8) return;
+    for (const dependencyId of parent.dependencies || []) {
+      const normalizedId = Number(dependencyId);
+      if (loaded.has(normalizedId)) continue;
+      const dependency = byId.get(normalizedId);
+      if (
+        !dependency ||
+        dependency.enabled === false ||
+        dependency.status === "deprecated"
+      ) continue;
+      loaded.add(normalizedId);
+      dependencies.push({ id: normalizedId, name: dependency.name });
+      sections.push(
+        `\n\n---\n\n## Sub-skill: ${dependency.name}\n\n${dependency.content || ""}`
+      );
+      appendDependencies(dependency, depth + 1);
+    }
+  };
+  appendDependencies(skill, 1);
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            ...skill,
+            content: sections.join(""),
+            resolvedDependencies: dependencies
+          },
+          null,
+          2
+        )
+      }
+    ]
+  };
 }
 
 async function handleMagicSetSkillEnabled(args) {
@@ -2823,7 +4062,43 @@ async function handleNativeBridgeMessage(port, message) {
 // -----------------------------
 // MCP Tool Definitions
 // -----------------------------
+const FREEMARKER_PREVIEW_SESSIONS_KEY = "magic_netsuite_freemarker_preview_sessions";
+const MAX_PERSISTED_FREEMARKER_SESSIONS = 8;
 const freemarkerPreviewSessions = new Map();
+const freemarkerPreviewSessionsReady = chrome.storage.local
+  .get(FREEMARKER_PREVIEW_SESSIONS_KEY)
+  .then((stored) => {
+    const sessions = stored?.[FREEMARKER_PREVIEW_SESSIONS_KEY];
+    if (!sessions || typeof sessions !== "object" || Array.isArray(sessions)) return;
+    Object.entries(sessions).forEach(([sessionId, session]) => {
+      if (session && typeof session === "object") {
+        freemarkerPreviewSessions.set(sessionId, session);
+      }
+    });
+  })
+  .catch((error) => {
+    console.warn("[FreeMarker Preview] Failed to restore persisted sessions.", error);
+  });
+
+async function persistFreemarkerPreviewSessions() {
+  const sessions = [...freemarkerPreviewSessions.entries()]
+    .sort(([, a], [, b]) => String(b?.updatedAt || "").localeCompare(String(a?.updatedAt || "")))
+    .slice(0, MAX_PERSISTED_FREEMARKER_SESSIONS);
+  freemarkerPreviewSessions.clear();
+  sessions.forEach(([sessionId, session]) => freemarkerPreviewSessions.set(sessionId, session));
+  const persistedSessions = sessions.map(([sessionId, session]) => {
+    const renderResult =
+      session?.renderResult && typeof session.renderResult === "object"
+        ? Object.fromEntries(
+            Object.entries(session.renderResult).filter(([key]) => key !== "pdf")
+          )
+        : session?.renderResult;
+    return [sessionId, { ...session, renderResult }];
+  });
+  await chrome.storage.local.set({
+    [FREEMARKER_PREVIEW_SESSIONS_KEY]: Object.fromEntries(persistedSessions)
+  });
+}
 
 const MCP_TOOL_DEFINITIONS = [
   {
@@ -2856,6 +4131,11 @@ const MCP_TOOL_DEFINITIONS = [
         content: { type: "string", description: "Markdown skill content." },
         markdown: { type: "string", description: "Alias for content." },
         domain: { type: "string", enum: ["global", "sql"], description: "Skill scope. Defaults to global." },
+        dependencies: {
+          type: "array",
+          items: { type: "number" },
+          description: "Ordered skill IDs to load recursively as reusable sub-skills."
+        },
         enabled: { type: "boolean", description: "Whether the skill is enabled. Defaults to true." },
         upsertByName: { type: "boolean", description: "Update a same-name skill if found. Defaults to true." }
       },
@@ -2885,7 +4165,7 @@ const MCP_TOOL_DEFINITIONS = [
   },
   {
     name: "magic_netsuite_load_skill",
-    description: "Load one Magic NetSuite skill, including its Markdown content, by ID.",
+    description: "Load one Magic NetSuite skill by ID and recursively compose its enabled sub-skill dependencies. Cycles and duplicate dependencies are suppressed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4230,9 +5510,237 @@ const MCP_TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "magic_netsuite_template_session_list",
+    description:
+      "List durable Template Studio design sessions and identify the current session. Sessions are created and selected from the Magic NetSuite dashboard.",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_get_current",
+    description:
+      "Load current Template Studio metadata, references, record context, render status, and active fix-request todos. Checked history and FreeMarker source are omitted by default.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: {
+          type: "string",
+          description: "Optional explicit session ID. Defaults to the current dashboard session."
+        },
+        includeReferences: {
+          type: "boolean",
+          description: "Include the session reference images. Defaults to true."
+        },
+        includeFreemarker: {
+          type: "boolean",
+          description: "Include the complete FreeMarker source. Defaults to false; prefer the read tool."
+        },
+        includeFeedbackHistory: {
+          type: "boolean",
+          description: "Include checked fix-request history. Defaults to false."
+        }
+      }
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_set_current",
+    description:
+      "Make an existing Template Studio session current so the dashboard and subsequent Claude tools operate on it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Template Studio session ID." }
+      },
+      required: ["sessionId"]
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_read",
+    description:
+      "Read only the needed FreeMarker lines from the current session, with line numbers and sourceVersion. Use search for a compact context window or explicit startLine/endLine.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        startLine: { type: "number" },
+        endLine: { type: "number" },
+        search: { type: "string" },
+        contextLines: {
+          type: "number",
+          description: "Lines before and after a search match. Defaults to 8."
+        }
+      }
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_patch",
+    description:
+      "Apply compact exact-text edits to the saved FreeMarker without resending the whole document. Requires the sourceVersion returned by read/get-current and rejects stale or ambiguous edits.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        expectedSourceVersion: { type: "number" },
+        edits: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              oldText: { type: "string" },
+              newText: { type: "string" },
+              all: {
+                type: "boolean",
+                description: "Replace every exact match. Defaults to false and requires a unique match."
+              }
+            },
+            required: ["oldText", "newText"]
+          }
+        },
+        changeSummary: { type: "string" },
+        addressFeedbackIds: {
+          type: "array",
+          items: { type: "string" }
+        },
+        render: { type: "boolean" },
+        screenshot: {
+          type: "boolean",
+          description: "With render:true, rasterize and return one complete PDF page."
+        },
+        screenshotPage: {
+          type: "number",
+          description: "One-based PDF page to return. Defaults to page 1."
+        },
+        screenshotWidth: {
+          type: "number",
+          description: "Raster width in pixels, clamped to 800-2400. Defaults to 1600."
+        }
+      },
+      required: ["expectedSourceVersion", "edits"]
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_update",
+    description:
+      "Create the initial complete FreeMarker document or replace it explicitly. For later revisions use template_session_read + template_session_patch to avoid retransmitting unchanged source.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: {
+          type: "string",
+          description: "Optional session ID. Defaults to the current session."
+        },
+        freemarker: {
+          type: "string",
+          description: "Complete BFO-compatible FreeMarker <pdf> document."
+        },
+        changeSummary: {
+          type: "string",
+          description: "Concise description of the design changes saved in this revision."
+        },
+        addressFeedbackIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Open fix-request IDs resolved by this revision."
+        },
+        name: { type: "string" },
+        prompt: { type: "string" },
+        contextMode: {
+          type: "string",
+          enum: ["freestyle", "transaction", "customrecord"]
+        },
+        recordType: { type: "string" },
+        recordId: { type: "string" },
+        recordLabel: { type: "string" },
+        accountId: { type: "string" },
+        status: {
+          type: "string",
+          enum: [
+            "brief_ready",
+            "designing",
+            "rendering",
+            "rendered",
+            "render_error",
+            "completed"
+          ]
+        },
+        makeCurrent: { type: "boolean" },
+        render: {
+          type: "boolean",
+          description: "Render through NetSuite after saving. Defaults to false."
+        },
+        screenshot: {
+          type: "boolean",
+          description: "With render:true, also rasterize one complete PDF page."
+        },
+        screenshotPage: {
+          type: "number",
+          description: "One-based PDF page to return. Defaults to page 1."
+        },
+        screenshotWidth: {
+          type: "number",
+          description: "Raster width in pixels, clamped to 800-2400. Defaults to 1600."
+        }
+      }
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_render",
+    description:
+      "Render the current session's saved FreeMarker directly through NetSuite. The resulting PDF and any render error are written back into the durable session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: {
+          type: "string",
+          description: "Optional session ID. Defaults to the current session."
+        },
+        screenshot: {
+          type: "boolean",
+          description: "Rasterize and return one complete PDF page after rendering."
+        },
+        screenshotPage: {
+          type: "number",
+          description: "One-based PDF page to return. Defaults to page 1."
+        },
+        screenshotWidth: {
+          type: "number",
+          description: "Raster width in pixels, clamped to 800-2400. Defaults to 1600."
+        }
+      }
+    }
+  },
+  {
+    name: "magic_netsuite_template_session_screenshot",
+    description:
+      "Rasterize one complete generated PDF page directly from the PDF bytes. Page selection is explicit and independent of viewer zoom, scroll, and viewport; no browser screenshot, Playwright, or chrome.debugger is used.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: {
+          type: "string",
+          description: "Optional session ID. Defaults to the current session."
+        },
+        render: {
+          type: "boolean",
+          description: "Rerender before capturing. Defaults to false."
+        },
+        page: {
+          type: "number",
+          description: "One-based PDF page to return. Defaults to page 1."
+        },
+        targetWidth: {
+          type: "number",
+          description: "Raster width in pixels, clamped to 800-2400. Defaults to 1600."
+        }
+      }
+    }
+  },
+  {
     name: "netsuite_freemarker_preview_html",
     description:
-      "Guarded FreeMarker renderer workflow, not the first step for template recreation. Use only after local BFO-safe template work and Playwright screenshot review, or when the user explicitly asks for renderer approval. If required server components are missing, this returns needsDeploymentApproval and the agent must ask the user before retrying with deployIfMissing:true.",
+      "Guarded FreeMarker renderer workflow, not the first step for template recreation. Use only after local BFO-safe template work and browser-tab screenshot review, or when the user explicitly asks for renderer approval. If required server components are missing, this returns needsDeploymentApproval and the agent must ask the user before retrying with deployIfMissing:true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4690,6 +6198,30 @@ async function handleRequest({ requestId, method, params }) {
           result = await handleNetsuiteRunQuickScript(args);
         } else if (name === "magic_netsuite_deploy_server_components") {
           result = await handleMagicDeployServerComponents();
+        } else if (name === "magic_netsuite_template_session_list") {
+          result = await handleTemplateDesignSessionList();
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_get_current") {
+          result = await handleTemplateDesignSessionGetCurrent(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_set_current") {
+          result = await handleTemplateDesignSessionSetCurrent(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_read") {
+          result = await handleTemplateDesignSessionRead(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_patch") {
+          result = await handleTemplateDesignSessionPatch(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_update") {
+          result = await handleTemplateDesignSessionUpdate(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_render") {
+          result = await handleTemplateDesignSessionRender(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_session_screenshot") {
+          result = await handleTemplateDesignSessionScreenshot(args);
+          executionSide = "local";
         } else if (name === "netsuite_freemarker_preview_html") {
           result = await handleFreemarkerPreviewHtml(args);
           executionSide = "local";
@@ -4701,6 +6233,18 @@ async function handleRequest({ requestId, method, params }) {
           executionSide = "local";
         } else if (name === "netsuite_freemarker_convert_approved") {
           result = await handleFreemarkerConvertApproved(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_review_surface_open") {
+          result = await handleTemplateReviewSurfaceOpen(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_review_surface_update") {
+          result = await handleTemplateReviewSurfaceUpdate(args);
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_review_surface_get") {
+          result = await handleTemplateReviewSurfaceGet();
+          executionSide = "local";
+        } else if (name === "magic_netsuite_template_review_surface_screenshot") {
+          result = await handleTemplateReviewSurfaceScreenshot();
           executionSide = "local";
         } else if (name === "netsuite_get_logs") {
           result = await handleNetsuiteGetLogs(args);
@@ -6150,6 +7694,7 @@ async function ensureFreemarkerRendererReady(deployIfMissing) {
 }
 
 async function handleFreemarkerPreviewHtml(args = {}) {
+  await freemarkerPreviewSessionsReady;
   const title = String(args.title ?? "FreeMarker Preview").trim() || "FreeMarker Preview";
   const readiness = await ensureFreemarkerRendererReady(args.deployIfMissing === true);
 
@@ -6177,6 +7722,7 @@ async function handleFreemarkerPreviewHtml(args = {}) {
     updatedAt: now
   };
   freemarkerPreviewSessions.set(session.sessionId, session);
+  await persistFreemarkerPreviewSessions();
 
   return asMcpTextResult({
     ok: true,
@@ -6187,6 +7733,7 @@ async function handleFreemarkerPreviewHtml(args = {}) {
 }
 
 async function handleFreemarkerSetApproval(args = {}) {
+  await freemarkerPreviewSessionsReady;
   const session = getFreemarkerSession(args.sessionId);
   const approved = args.approved === true;
   const feedback = String(args.feedback ?? "").trim();
@@ -6195,6 +7742,7 @@ async function handleFreemarkerSetApproval(args = {}) {
   session.status = approved ? "approved" : "needs_changes";
   session.updatedAt = new Date().toISOString();
   freemarkerPreviewSessions.set(session.sessionId, session);
+  await persistFreemarkerPreviewSessions();
   return asMcpTextResult({
     ok: true,
     ...summarizeFreemarkerSession(session),
@@ -6205,6 +7753,7 @@ async function handleFreemarkerSetApproval(args = {}) {
 }
 
 async function handleFreemarkerApprovalStatus(args = {}) {
+  await freemarkerPreviewSessionsReady;
   const session = getFreemarkerSession(args.sessionId);
   return asMcpTextResult({
     ok: true,
@@ -6212,7 +7761,54 @@ async function handleFreemarkerApprovalStatus(args = {}) {
   });
 }
 
+function templateReviewPdfFromRenderResult(value) {
+  if (!value || typeof value !== "object") {
+    return {
+      pdfDataUrl: "",
+      renderError: value ? "NetSuite returned an invalid PDF render result." : ""
+    };
+  }
+  if (value.success === false || value.error) {
+    return {
+      pdfDataUrl: "",
+      renderError: String(value.error || "NetSuite PDF rendering failed.")
+    };
+  }
+  const pdf = typeof value.pdf === "string" ? value.pdf.trim() : "";
+  if (!pdf) {
+    return {
+      pdfDataUrl: "",
+      renderError: "NetSuite did not return PDF data."
+    };
+  }
+  const mimeType =
+    typeof value.mimeType === "string" && value.mimeType
+      ? value.mimeType
+      : "application/pdf";
+  return {
+    pdfDataUrl: pdf.startsWith("data:") ? pdf : `data:${mimeType};base64,${pdf}`,
+    renderError: ""
+  };
+}
+
+async function syncTemplateReviewFromFreemarkerSession(session) {
+  const review = await getTemplateReviewState();
+  if (!review || review.sessionId !== session.sessionId) return;
+  const rendered = templateReviewPdfFromRenderResult(session.renderResult);
+  await updateTemplateReviewState({
+    freemarker: String(session.freemarker || ""),
+    pdfDataUrl: rendered.pdfDataUrl,
+    renderError: rendered.renderError,
+    recordType: String(session.recordType || review.recordType || ""),
+    recordId: String(session.recordId || review.recordId || ""),
+    sessionId: session.sessionId,
+    status: "freemarker_review",
+    feedback: ""
+  });
+}
+
 async function handleFreemarkerConvertApproved(args = {}) {
+  await freemarkerPreviewSessionsReady;
   const session = getFreemarkerSession(args.sessionId);
   if (!session.approved) {
     return asMcpTextResult({
@@ -6250,6 +7846,8 @@ async function handleFreemarkerConvertApproved(args = {}) {
   session.status = renderPdf ? "rendered" : "converted";
   session.updatedAt = new Date().toISOString();
   freemarkerPreviewSessions.set(session.sessionId, session);
+  await persistFreemarkerPreviewSessions();
+  await syncTemplateReviewFromFreemarkerSession(session);
 
   return asMcpTextResult({
     ok: true,
