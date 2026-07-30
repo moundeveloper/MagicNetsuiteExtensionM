@@ -176,6 +176,72 @@ function parseToolJson(result) {
         return text;
     }
 }
+const TEMPLATE_DESIGN_SKILL_NAME = "Design NetSuite FreeMarker Template";
+async function loadTemplateDesignSkillPreflight(session) {
+    if (!isRecord(session) || Number(session.sourceVersion ?? 0) > 0)
+        return null;
+    const query = [
+        "netsuite freemarker advanced pdf bfo template visual design first draft",
+        String(session.name ?? ""),
+        String(session.prompt ?? ""),
+        String(session.recordType ?? ""),
+    ].filter(Boolean).join(" ");
+    try {
+        const searchPayload = parseToolJson(await callExtensionTool("magic_netsuite_search_skills", {
+            query,
+            includeDisabled: false,
+        }));
+        const results = isRecord(searchPayload) && Array.isArray(searchPayload.results)
+            ? searchPayload.results.filter(isRecord)
+            : [];
+        const baseline = results.find((result) => String(result.name ?? "") === TEMPLATE_DESIGN_SKILL_NAME);
+        const specific = results.find((result) => {
+            if (result === baseline)
+                return false;
+            const metadata = `${String(result.name ?? "")} ${String(result.description ?? "")} ${String(result.tags ?? "")}`;
+            return (/\b(freemarker|free\s*marker|bfo|advanced\s+pdf)\b/i.test(metadata) &&
+                Number(result.score ?? 0) >= 30);
+        });
+        const selected = [specific, baseline ?? results[0]]
+            .filter((result) => Boolean(result))
+            .filter((result, index, items) => items.findIndex((item) => Number(item.id) === Number(result.id)) === index)
+            .slice(0, 2);
+        const loaded = [];
+        for (const match of selected) {
+            const id = Number(match.id);
+            if (!Number.isFinite(id))
+                continue;
+            const payload = parseToolJson(await callExtensionTool("magic_netsuite_load_skill", { id }));
+            if (!isRecord(payload))
+                continue;
+            loaded.push({
+                id,
+                name: String(payload.name ?? match.name ?? ""),
+                source: String(match.source ?? "manual"),
+                score: Number(match.score ?? 0),
+                content: String(payload.content ?? "").slice(0, 12000),
+                dependencies: Array.isArray(payload.dependencies)
+                    ? payload.dependencies
+                    : [],
+            });
+        }
+        return {
+            status: loaded.length ? "loaded" : "no_relevant_skill",
+            query,
+            loaded,
+            instruction: loaded.length
+                ? "Apply these local skills before writing the initial FreeMarker. More specific reviewed custom guidance takes precedence over the bundled baseline."
+                : "No relevant enabled local FreeMarker skill was found. Continue with the workflow guidance and render quality gate.",
+        };
+    }
+    catch (error) {
+        return {
+            status: "unavailable",
+            query,
+            message: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
 let extensionTemplateReviewState = null;
 function extensionReviewResult(result) {
     const parsed = parseToolJson(result);
@@ -633,6 +699,7 @@ export function createServer() {
         },
     }, async ({ recordType = "invoice", designName = "NetSuite template" }) => {
         let skillMatches = null;
+        let skillPreflight = null;
         let currentSession = null;
         try {
             skillMatches = parseToolJson(await callExtensionTool("magic_netsuite_search_skills", {
@@ -654,12 +721,14 @@ export function createServer() {
                 message: error instanceof Error ? error.message : String(error),
             };
         }
+        skillPreflight = await loadTemplateDesignSkillPreflight(currentSession);
         return toolResult({
             recordType,
             designName,
             workflow: NETSUITE_TEMPLATE_RECREATION_WORKFLOW,
             currentSession,
-            requiredNextAction: "Call magic_netsuite_template_session_get_current with references, load the best matching composed skill, then create the initial FreeMarker once or read/patch the existing source incrementally.",
+            skillPreflight,
+            requiredNextAction: "Call magic_netsuite_template_session_get_current with references. Its first-draft skill preflight is loaded automatically; apply it before creating the initial FreeMarker, or read/patch an existing source incrementally.",
             updateTool: "magic_netsuite_template_session_update",
             readTool: "magic_netsuite_template_session_read",
             patchTool: "magic_netsuite_template_session_patch",
@@ -675,19 +744,43 @@ export function createServer() {
     }, async () => callExtensionToolResult("magic_netsuite_template_session_list"));
     server.registerTool("magic_netsuite_template_session_get_current", {
         title: "Get Current Template Studio Session",
-        description: "Load current collaborative metadata, references, record context, render status, revisions, and active fix-request todos. Checked history and full FreeMarker are omitted by default.",
+        description: "Load current collaborative metadata, references, record context, render status, revisions, and active fix-request todos. For a new session, this also searches and loads the most relevant local/custom FreeMarker design skills before the first draft. Checked history and full FreeMarker are omitted by default.",
         inputSchema: {
             sessionId: z.string().optional(),
             includeReferences: z.boolean().optional().describe("Include reference images. Defaults to true."),
             includeFreemarker: z.boolean().optional().describe("Include the complete source. Defaults to false; prefer template_session_read."),
             includeFeedbackHistory: z.boolean().optional().describe("Include checked fix-request history. Defaults to false."),
         },
-    }, async ({ sessionId, includeReferences = true, includeFreemarker = false, includeFeedbackHistory = false }) => callExtensionToolResult("magic_netsuite_template_session_get_current", {
-        sessionId,
-        includeReferences,
-        includeFreemarker,
-        includeFeedbackHistory,
-    }));
+    }, async ({ sessionId, includeReferences = true, includeFreemarker = false, includeFeedbackHistory = false }) => {
+        const result = await callExtensionTool("magic_netsuite_template_session_get_current", {
+            sessionId,
+            includeReferences,
+            includeFreemarker,
+            includeFeedbackHistory,
+        });
+        const session = parseToolJson(result);
+        const skillPreflight = await loadTemplateDesignSkillPreflight(session);
+        if (!skillPreflight || !isRecord(session)) {
+            return {
+                ...result,
+                content: (result.content ?? []),
+            };
+        }
+        const nonTextContent = (result.content ?? []).filter((item) => item.type !== "text");
+        return {
+            ...result,
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify({
+                        ...session,
+                        localSkillPreflight: skillPreflight,
+                    }, null, 2),
+                },
+                ...nonTextContent,
+            ],
+        };
+    });
     server.registerTool("magic_netsuite_template_session_set_current", {
         title: "Set Current Template Studio Session",
         description: "Select an existing dashboard Template Studio session as current for both Claude and the UI.",
@@ -729,7 +822,7 @@ export function createServer() {
     }, async (args) => callExtensionToolResult("magic_netsuite_template_session_patch", args));
     server.registerTool("magic_netsuite_template_session_update", {
         title: "Update Current FreeMarker Design",
-        description: "Create the initial complete FreeMarker document or explicitly replace it. Use read + patch for later revisions so unchanged source is not retransmitted.",
+        description: "Create the initial complete FreeMarker document or explicitly replace it. Before the initial draft, call template_session_get_current and apply its automatically loaded localSkillPreflight. Use read + patch for later revisions so unchanged source is not retransmitted.",
         inputSchema: {
             sessionId: z.string().optional(),
             freemarker: z.string().optional().describe("Complete BFO-compatible FreeMarker <pdf> document."),

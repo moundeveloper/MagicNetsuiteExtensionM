@@ -1,0 +1,2 @@
+allowBuilds:
+  '@oracle/suitecloud-cli': set this to true or false

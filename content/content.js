@@ -1,18 +1,139 @@
-// ============================================================================
-// Main Content Script Entry Point (dynamic module loader)
-// ============================================================================
+(()=>{var G=()=>{let t=new Uint8Array(32);return crypto.getRandomValues(t),Array.from(t,e=>e.toString(16).padStart(2,"0")).join("")},Ee=(t,e)=>{let s=document.createElement("script"),n=new URL(chrome.runtime.getURL(t));t.endsWith("/netsuiteApi.js")&&n.searchParams.set("bridgeCapability",e),s.src=n.toString(),s.onload=function(){this.remove()},(document.head||document.documentElement).appendChild(s)},W=(t,e)=>{t.forEach(s=>Ee(s,e))};var Y=["netsuiteApi/scripts.js","netsuiteApi/customRecords.js","netsuiteApi/sandboxCode.js","netsuiteApi/exportRecord.js","netsuiteApi/logs.js","netsuiteApi/mediaItems.js","netsuiteApi/lists.js","netsuiteApi/advancedPdfTemplates.js","netsuiteApi/suiteQL.js","netsuiteApi/netsuiteApi.js","netsuiteApi/serverScriptManager.js","globalUtils.js"];var T={TO_EXTENSION:"TO_EXTENSION",FROM_EXTENSION:"FROM_EXTENSION",STREAM_END:"STREAM_END",STREAM_ERROR:"STREAM_ERROR",STREAM_ABORT:"STREAM_ABORT"},_={NORMAL:"normal",STREAM:"stream"},F=3e4,L=3,X=()=>Date.now().toString(36)+Math.random().toString(36).substring(2,9),$=(t,e)=>s=>!(s.source!==window||s.origin!==window.location.origin||s.data?.type!==T.TO_EXTENSION||s.data?.capability!==e||s.data?.payload?.requestId!==t);var k=class{constructor(e,s,n){this.requestId=e,this.bridgeCapability=s,this.sendChunk=n,this.timeoutId=null,this.isActive=!0,this.chunkCount=0}start(){this.handleStream=this.handleStream.bind(this),window.addEventListener("message",this.handleStream),this.timeoutId=setTimeout(()=>{this.sendChunk({status:"error",error:"Stream timeout",isComplete:!0}),this.cleanup()},F)}handleStream(e){if(!this.isActive||!$(this.requestId,this.bridgeCapability)(e))return;let{payload:s}=e.data;switch(this.chunkCount++,s.type){case T.STREAM_END:console.log("[StreamHandler] Received stream end, sending last chunk",s),this.sendChunk({...s,isComplete:!0}),this.cleanup();break;case T.STREAM_ERROR:console.log("[StreamHandler] Received stream error",s),this.sendChunk({status:"error",error:s.error,isComplete:!0}),this.cleanup();break;case T.STREAM_ABORT:console.log("[StreamHandler] Received stream abort",s),this.cleanup();break;default:console.log("[StreamHandler] Received stream chunk",s),this.sendChunk({...s,isComplete:!1})}}cleanup(){this.isActive=!1,window.removeEventListener("message",this.handleStream),clearTimeout(this.timeoutId)}abort(){this.cleanup()}},q=class{constructor(e,s,n,o=0){this.requestId=e,this.bridgeCapability=s,this.sendResponse=n,this.retryAttempts=o,this.timeoutId=null,this.isActive=!0}start(){this.handleResponse=this.handleResponse.bind(this),window.addEventListener("message",this.handleResponse),this.timeoutId=setTimeout(()=>{this.retryAttempts<L?(console.warn(`[Request ${this.requestId}] Timeout, retrying... (${this.retryAttempts+1}/${L})`),this.cleanup(),this.sendResponse({status:"retry",requestId:this.requestId,attempt:this.retryAttempts+1})):(console.error(`[Request ${this.requestId}] Timeout after ${L} attempts`),this.sendResponse({status:"error",error:"Request timeout",requestId:this.requestId}),this.cleanup())},F),console.log(`[Request ${this.requestId}] Started`)}handleResponse(e){if(!this.isActive||!$(this.requestId,this.bridgeCapability)(e))return;let{payload:s}=e.data;if(console.log(`[Request ${this.requestId}] Response received`,s),!(s.event&&!["done","error"].includes(s.event))){if(s.event==="done"){this.sendResponse({requestId:this.requestId,status:"ok",message:{result:s.result,logs:s.logs||[]}}),this.cleanup();return}if(s.event==="error"){this.sendResponse({requestId:this.requestId,status:"error",message:s.error||"Request failed"}),this.cleanup();return}this.sendResponse(s),this.cleanup()}}cleanup(){this.isActive=!1,window.removeEventListener("message",this.handleResponse),this.timeoutId&&(clearTimeout(this.timeoutId),this.timeoutId=null)}};var O=class{constructor(){this.activeRequests=new Map}addRequest(e,s){this.activeRequests.set(e,s)}removeRequest(e){this.activeRequests.delete(e)}abortRequest(e){let s=this.activeRequests.get(e);return s&&typeof s.abort=="function"?(s.abort(),this.removeRequest(e),!0):!1}abortAll(){this.activeRequests.forEach(e=>{typeof e.abort=="function"&&e.abort()}),this.activeRequests.clear()}getActiveCount(){return this.activeRequests.size}};var be=fetch,Q=4,we="/app/help/helpcenter.nl?fid=chapter_4220488571.html",Se=async(t,e=Q)=>{let s=[],n=[];for(let o of t){let r=o().then(i=>(n.splice(n.indexOf(r),1),i));s.push(r),n.push(r),n.length>=e&&await Promise.race(n)}return Promise.all(s)},z=async t=>{let s=await(await be(t)).text();return new DOMParser().parseFromString(s,"text/html")},xe=async t=>{let e=t+we,s=await z(e),n=Array.from(s.querySelectorAll("h1")).find(i=>i.textContent.includes("SuiteScript 2.x Modules"));if(!n)return null;let o=n.closest("div.nshelp_page")?.querySelector("table.grid");if(!o)return null;let r=o.querySelectorAll("tbody tr");return Array.from(r).map(i=>i.querySelector("td p a")).filter(i=>!!i).map(i=>{let c=i.getAttribute("href");return{name:i.textContent.trim(),url:new URL(c,e).href}})},Ce=t=>{let e={};return Array.from(t.querySelectorAll("tr")).forEach(s=>{let n=Array.from(s.querySelectorAll("td"));if(n.length<2)return;let o=n[0].textContent.trim(),r=Array.from(n[1].querySelectorAll("p"));e[o]=r.length?r.map(i=>i.textContent.trim()).join(`
 
-(async () => {
-  try {
-    // Construct the module URL relative to the extension root
-    const moduleURL = chrome.runtime.getURL("content/content_export.js");
+`):n[1].textContent.trim()}),e},Ae=t=>{let e=Array.from(t.querySelectorAll("thead th")).map(n=>n.textContent.trim());return Array.from(t.querySelectorAll("tbody tr")).map(n=>{let o=Array.from(n.querySelectorAll("td")),r={};return o.forEach((i,c)=>{let l=e[c],a=Array.from(i.querySelectorAll("p")),g=Array.from(i.querySelectorAll("ul")),u=[];a.length&&u.push(...a.map(d=>d.textContent.trim())),g.length&&g.forEach(d=>{let h=Array.from(d.querySelectorAll("li")).map(m=>`- ${m.textContent.trim()}`);u.push(h.join(`
+`))}),r[l]=u.length?u.join(`
 
-    // Dynamically import the module
-    const contentMain = await import(moduleURL);
+`):i.textContent.trim()}),r})},Re=t=>{let e=[];return t.querySelectorAll("td").forEach(n=>{n.querySelectorAll("code").forEach(r=>{let i=r.textContent.trim();i&&e.push(i)})}),e},Te=async t=>{let e=await z(t),s={overview:null,notes:[],parameters:[],errors:[],syntax:null,enumValues:[]},n=e.querySelector("table.grid");return n&&(s.overview=Ce(n)),e.querySelectorAll("h2").forEach(o=>{let r=o.textContent.trim().toLowerCase();if(r==="syntax"){let c=e.querySelector("pre code");s.syntax=c?c.textContent.trim():null;return}if(r==="values"){let c=o.nextElementSibling;for(;c;){if(c.tagName==="DIV"&&c.querySelector("table.grid")){s.enumValues=Re(c);break}c=c.nextElementSibling}return}let i=o.nextElementSibling;for(;i;){if(i.querySelector?.("table.grid")){s[r]=Ae(i)||[];break}i=i.nextElementSibling}}),s},ve=async(t,e)=>{let s=Array.from(t.querySelectorAll("tr")),n=Array.from(s.shift().querySelectorAll("th")).map(c=>c.textContent.trim()),o=[],r={},i=[];for(let c of s){let l={},a=0,g=Array.from(c.children);for(let u of g){for(;r[a];)l[n[a]]=r[a].value,r[a].remaining--,r[a].remaining===0&&delete r[a],a++;let d=u.textContent.trim(),h=parseInt(u.getAttribute("colspan")||"1"),m=parseInt(u.getAttribute("rowspan")||"1");for(let f=0;f<h;f++){if(n[a]==="Name"){let p=u.querySelector("a")?.getAttribute("href");if(l[n[a]]=d.toUpperCase(),p){let y=new URL(p,e).href,E=Te(y).then(b=>{l.details=b});i.push(E)}}else l[n[a]]=d;m>1&&(r[a]={value:d,remaining:m-1}),a++}}for(;a<n.length;)r[a]&&(l[n[a]]=r[a].value,r[a].remaining--,r[a].remaining===0&&delete r[a]),a++;o.push(l)}return await Promise.all(i),o},Me=async t=>{let e=await z(t),s=Array.from(e.querySelectorAll("h2")),n=[];return(await Promise.all(s.map(async r=>{let i=r.textContent.trim(),c=[],l=r.nextElementSibling;for(;l&&l.tagName!=="H2";){let g=l.querySelector?.("table.grid");g&&c.push(g),l=l.nextElementSibling}return c.length?(await Promise.all(c.map(g=>ve(g,t)))).map(g=>({section:i,table:g})):null}))).filter(Boolean).forEach(r=>n.push(...r)),n},Z=async(t,e)=>{if(!t){e({type:"error",error:"No NetSuite base URL provided."});return}let s;try{s=await xe(t)}catch(i){e({type:"error",error:`Failed to load modules index: ${i.message}`});return}if(!s||s.length===0){e({type:"error",error:"Could not find SuiteScript 2.x Modules table on the help page."});return}let n=s.length,o=0,r=s.map(i=>async()=>{let c=await Me(i.url);return o++,e({type:"progress",current:o,total:n,moduleName:i.name}),{module:i.name,data:c}});try{let i=await Se(r,Q);e({type:"complete",data:i})}catch(i){e({type:"error",error:i.message})}};var P=new O,Ie="SCRAPE_SUITESCRIPT_MODULES",_e=200,Le=new Set(["script","style","noscript","svg"]),ke=new Set(["article","aside","blockquote","div","dl","fieldset","figure","footer","form","header","main","nav","ol","p","section","table","ul"]),J=new Set(["h1","h2","h3","h4","h5","h6"]),A=t=>t.replace(/\r/g,"").replace(/[ \t\f\v]+/g," ").replace(/ *\n */g,`
+`).replace(/\n{3,}/g,`
 
-    // Call the module's entry function
-    contentMain.initExtension();
-  } catch (error) {
-    console.error("[Magic Netsuite] Failed to load content module:", error);
+`).trim(),ee=(t,e)=>{let s=String(t??"").trim();if(!s)return"";let n=s.toLowerCase();if(n.startsWith("javascript:")||n.startsWith("mailto:")||n.startsWith("tel:"))return"";try{let o=new URL(s,e).href;return o.startsWith("http://")||o.startsWith("https://")?o:""}catch{return""}},qe=t=>{let e=t;for(;e;){let s=e.previousElementSibling;for(;s;){if(J.has(s.tagName.toLowerCase()))return A(s.textContent??"");let n=Array.from(s.querySelectorAll("h1,h2,h3,h4,h5,h6")),o=n[n.length-1];if(o)return A(o.textContent??"");s=s.previousElementSibling}e=e.parentElement}return""},Oe=(t,e)=>{let s=[],n=new Set,o=(l,a,g)=>{if(!g)return;let u=A(a)||g,d=`${u}
+${g}`;if(!n.has(d)&&(n.add(d),s.length<_e)){let h=qe(l);s.push({text:u,url:g,...h?{section:h}:{}})}},r=l=>Array.from(l.childNodes).map(i).join(""),i=l=>{if(l.nodeType===Node.TEXT_NODE)return(l.textContent??"").replace(/\s+/g," ");if(l.nodeType!==Node.ELEMENT_NODE)return"";let a=l,g=a.tagName.toLowerCase();if(Le.has(g))return"";if(g==="br")return`
+`;if(g==="a"){let d=A(r(a)||a.textContent||""),h=ee(a.getAttribute("href"),e);return h?(o(a,d,h),d||h):d}if(g==="pre")return`
+
+${(a.textContent??"").trim()}
+
+`;if(g==="code")return A(a.textContent??"");if(g==="li")return`
+${A(r(a))}`;if(g==="tr"){let d=Array.from(a.children).filter(h=>["td","th"].includes(h.tagName.toLowerCase())).map(h=>A(r(h))).filter(Boolean);return d.length?`
+${d.join(" ")}`:""}if(J.has(g))return`
+
+${A(r(a))}
+
+`;let u=r(a);return ke.has(g)?`
+
+${u}
+
+`:u};return{content:A(i(t)),links:s,linkCount:n.size,linksTruncated:n.size>s.length}},te=t=>{chrome.runtime.onConnect.addListener(e=>{e.name==="stream-api"&&(e.onMessage.addListener(s=>{let{action:n,data:o,mode:r,tabId:i}=s,c=X();if(r!==_.STREAM)return;if(n===Ie){Z(o?.baseUrl,a=>{e.postMessage({...a,requestId:c})});return}let l=new k(c,t,a=>{e.postMessage(a)});P.addRequest(c,l),l.start(),window.postMessage({type:T.FROM_EXTENSION,capability:t,payload:{action:n,data:o,requestId:c,mode:r}},window.location.origin)}),e.onDisconnect.addListener(()=>{P.abortAll()}))}),chrome.runtime.onMessage.addListener((e,s,n)=>{let{action:o,data:r,mode:i=_.NORMAL}=e,c=X();if(i!==_.NORMAL)return;if(o==="FETCH_HELP_PAGE"){let u=r?.url??"",d=r?.operation??"read",h=r?.baseUrl??"";return fetch(u,{credentials:"include"}).then(m=>{if(!m.ok)throw new Error(`HTTP ${m.status}`);return m.text()}).then(m=>{let p=new DOMParser().parseFromString(m,"text/html");if(d==="search"){let y=p.querySelectorAll(".result-title"),E=p.querySelectorAll(".result-body"),b=[];y.forEach((x,v)=>{let C=x.querySelector("a"),S=(C?.textContent??x.textContent??"").trim(),M=C?.getAttribute("href")??"",R=ee(M,u||h),I=(E[v]?.textContent??"").trim();S&&R&&b.push({title:S,url:R,summary:I})}),n({status:"ok",message:{results:b}})}else{let y=p.getElementById("nshelp_page")??p.querySelector(".nshelp_page")??p.querySelector("main")??p.body,E=A(y?.querySelector("h1")?.textContent??p.querySelector("title")?.textContent??""),b=Oe(y,u);n({status:"ok",message:{title:E,...b}})}}).catch(m=>n({status:"error",message:String(m?.message??m)})),!0}let l=u=>{let d=[],h="",m=!1;for(let f=0;f<u.length;f++){let p=u[f];p==='"'?m&&u[f+1]==='"'?(h+='"',f++):m=!m:p===","&&!m?(d.push(h.trim()),h=""):h+=p}return d.push(h.trim()),d};if(o==="FETCH_BUNDLES"){let{domain:u,bundleType:d="both"}=r??{},h={Name:"name","Bundle ID":"bundleId",Version:"version","App ID":"appId",Abstract:"abstract","Created By":"createdBy","Created On":"createdOn","Last Update":"lastUpdate"},m=p=>{let y=`https://${u}/app/bundler/bundlelist.csv?type=${p}&sortcol=bundlename&sortdir=ASC&csv=Export`,E=p==="I"?"installed":"created";return fetch(y,{credentials:"include"}).then(b=>{if(!b.ok)throw new Error(`HTTP ${b.status}`);return b.text()}).then(b=>{let x=b.split(`
+`).filter(S=>S.trim()!=="");if(x.length<2)return[];x.shift();let v=l(x[0]),C=[];for(let S=1;S<x.length;S++){let M=l(x[S]),R={type:E};v.forEach((I,j)=>{h[I]&&(R[h[I]]=M[j]??"")}),R.bundleId&&C.push(R)}return C})},f=d==="I"?["I"]:d==="S"?["S"]:["I","S"];return Promise.all(f.map(m)).then(p=>{let y=p.flat();n({status:"ok",message:{bundles:y}})}).catch(p=>n({status:"error",message:String(p?.message??p)})),!0}if(o==="FETCH_BUNDLE_COMPONENTS"){let{domain:u,bundleId:d}=r??{},m=((u??"").split(".")[0]??"").toLowerCase().replace(/-/g,"_"),f=`https://${u}/app/bundler/bundlecontents.csv?csv=Export&OfficeXML=F&id=${d}&fetchcompid=${m}`,p=y=>{if(!y)return!1;let E=l(y);return!!E[0]&&!E[1]&&!E[2]&&!E[3]};return fetch(f,{credentials:"include"}).then(y=>{if(!y.ok)throw new Error(`HTTP ${y.status}`);return y.text()}).then(y=>{let E=y.split(`
+`).filter(C=>C.trim()!=="");if(E.length<2){n({status:"ok",message:{components:[]}});return}let b="",x="",v=[];for(let C=1;C<E.length;C++){let S=E[C],M=E[C+1]??"";if(p(S)){M&&!p(M)?x=l(S)[0]??"":(b=l(S)[0]??"",x="");continue}let[R,I,j,ye]=l(S);R&&v.push({name:R,id:I??"",referencedBy:j??"",isLocked:!!ye,category:b,subCategory:x})}n({status:"ok",message:{components:v}})}).catch(y=>n({status:"error",message:String(y?.message??y)})),!0}let a=(u,d)=>{let m=((u??"").split(".")[0]??"").replace(/-/g,"_").toUpperCase(),f=new URL(`https://${u}/app/bundler/bundledetails.nl`);return f.searchParams.set("selectedtab","tab"),f.searchParams.set("id",String(d)),f.searchParams.set("sourcecompanyid",m),f.searchParams.set("domain",String(u).toLowerCase().includes("-sb")?"SANDBOX":"PRODUCTION"),f.searchParams.set("loadsuiteappdata","T"),f.searchParams.set("whence",""),f.toString()};if(o==="CHECK_BUNDLE_SDF_CONVERSION"){let{domain:u,bundleId:d}=r??{},h=a(u,d);return fetch(h,{credentials:"include"}).then(m=>{if(!m.ok)throw new Error(`HTTP ${m.status} checking SDF conversion status`);return m.text()}).then(m=>{let f=(m.match(/<button\b[^>]*>/gi)??[]).find(E=>/\bid\s*=\s*(["'])converttoacp\1/i.test(E)),p=!!f,y=f?/\sdisabled(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?(?=\s|>)/i.test(f):!1;n({status:"ok",message:{buttonFound:p,disabled:y,canConvert:p&&!y,inProgress:p&&y,detailsUrl:h}})}).catch(m=>n({status:"error",message:String(m?.message??m)})),!0}if(o==="START_BUNDLE_SDF_CONVERSION"){let{domain:u,bundleId:d,detailsUrl:h}=r??{},m=h||a(u,d),f=new URL(`https://${u}/app/suiteapp/bundlesuiteappconvert/convert.nl`);return f.searchParams.set("bundleid",String(d)),fetch(f,{method:"GET",credentials:"include",referrer:m,referrerPolicy:"strict-origin-when-cross-origin"}).then(p=>{if(!p.ok)throw new Error(`HTTP ${p.status} starting SDF conversion`);n({status:"ok",message:{started:!0}})}).catch(p=>n({status:"error",message:String(p?.message??p)})),!0}let g=new q(c,t,n);return P.addRequest(c,g),g.start(),window.postMessage({type:T.FROM_EXTENSION,capability:t,payload:{...e,requestId:c}},window.location.origin),!0}),window.addEventListener("beforeunload",()=>{console.log("Content script unloading, aborting all requests..."),P.abortAll()})};var se=()=>{let t=XMLHttpRequest.prototype.open,e=XMLHttpRequest.prototype.send,s=XMLHttpRequest.prototype.setRequestHeader;XMLHttpRequest.prototype.open=function(n,o){return this._method=n,this._url=o,this._requestHeaders={},t.apply(this,arguments)},XMLHttpRequest.prototype.setRequestHeader=function(n,o){return this._requestHeaders[n]=o,s.apply(this,arguments)},XMLHttpRequest.prototype.send=function(n){let o={type:"xhr_request",url:this._url,method:this._method,headers:this._requestHeaders,body:n,timestamp:Date.now()};return chrome.runtime.sendMessage(o),this.addEventListener("readystatechange",function(){if(this.readyState===4){let r={type:"xhr_response",url:this._url,status:this.status,responseText:this.responseText,responseHeaders:this.getAllResponseHeaders(),timestamp:Date.now()};chrome.runtime.sendMessage(r)}}),e.apply(this,arguments)}};var ne=()=>{let t=window.fetch;window.fetch=function(...e){let s=e[0],n=e[1]||{},o={type:"fetch_request",url:s,method:n.method||"GET",headers:n.headers?Object.fromEntries(new Headers(n.headers).entries()):{},body:n.body,timestamp:Date.now()};return chrome.runtime.sendMessage(o),t.apply(this,e).then(r=>(r.clone().text().then(i=>{let c={type:"fetch_response",url:s,status:r.status,responseBody:i,responseHeaders:Object.fromEntries(r.headers.entries()),timestamp:Date.now()};chrome.runtime.sendMessage(c)}),r))}};var re=`
+  #magic-netsuite-dock {
+    display: flex;
+    flex-direction: row-reverse;
+    align-items: flex-start;
   }
-})();
+  #magic-netsuite-dock .dock-trigger {
+    display: flex;
+    flex-direction: column;
+  }
+  #magic-netsuite-dock .dock-arrow {
+    cursor: pointer;
+    background-color: #8C9BFF;
+    color: white;
+    padding: 8px 10px;
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+    text-align: center;
+    user-select: none;
+    transition: background-color 0.2s;
+  }
+  #magic-netsuite-dock .dock-arrow:hover {
+    background-color: #7a8ae6;
+  }
+  #magic-netsuite-dock .dock-content {
+    background: #f3f4f6;
+    border: 1px solid #ccc;
+    border-radius: 8px 0 0 8px;
+    max-width: 0;
+    opacity: 0;
+    transition: all 0.3s ease;
+    overflow: hidden;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  #magic-netsuite-dock .dock-trigger:hover + .dock-content,
+  #magic-netsuite-dock .dock-content:hover {
+    max-width: 300px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  #magic-netsuite-dock .dock-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  #magic-netsuite-dock .dock-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    gap: 16px;
+    border-bottom: 1px solid #e5e7eb;
+    min-width: 180px;
+  }
+  #magic-netsuite-dock .dock-item:last-child {
+    border-bottom: none;
+  }
+  #magic-netsuite-dock .dock-label {
+    font-size: 14px;
+    color: #374151;
+    white-space: nowrap;
+  }
+  .my-ext-switch {
+    position: relative;
+    display: inline-block;
+    width: 46px;
+    height: 26px;
+    flex-shrink: 0;
+  }
+  .my-ext-switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background-color: #ccc;
+    transition: 0.25s;
+    border-radius: 26px;
+  }
+  .slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: 0.25s;
+    border-radius: 50%;
+  }
+  input:checked + .slider { background-color: #8C9BFF; }
+  input:checked + .slider:before { transform: translateX(20px); }
+`;var oe=async()=>{let t=await chrome.storage.sync.get(["magic_netsuite_settings"]);if(console.log("[initMagicNetsuiteSettings] result",t),t.magic_netsuite_settings){console.log("[initMagicNetsuiteSettings] Settings already exist");return}let e={extensionToggle:"Alt+Shift+U",drawerOpen:"ctrl+k",modulesSearch:"ctrl+m",elementScreenshotShortcut:"ctrl+shift+s",openOnCustomizationPage:!0,dashboardPreviewEnabled:!1};console.log("[initMagicNetsuiteSettings] Settings created"),await chrome.storage.sync.set({magic_netsuite_settings:e})};var D="magic-netsuite-frame",N=()=>{let t=document.getElementById(D);t&&(t.style.pointerEvents="auto",requestAnimationFrame(()=>{t.style.opacity="1",t.style.transform="translateY(0)"}))},ie=()=>{let t=document.getElementById(D);t&&(t.style.pointerEvents="none",t.style.opacity="0",t.style.transform="translateY(20px)")},K=(t="",e={})=>{let s=document.getElementById(D);if(s)return;let n=chrome.runtime.getURL("dist/vue-ui/index.html"),o=new URL(n);t&&o.searchParams.set("initialRoute",t),e.executionSurface&&o.searchParams.set("magicExecutionSurface","1"),s=document.createElement("iframe"),s.allow="clipboard-read; clipboard-write",s.id=D,s.src=o.toString(),Object.assign(s.style,{position:"fixed",top:"0",right:"0",width:"100%",height:"100vh",border:"none",zIndex:"20000000",opacity:"0",transform:"translateY(20px)",transition:"opacity 0.3s ease, transform 0.3s ease",pointerEvents:"none"}),document.body.appendChild(s)};var Pe="magic-netsuite-frame",ae="magic-netsuite-dock",ce="magic-netsuite-toggle",le=async()=>{if(await oe(),document.getElementById(ae))return;let t=document.createElement("div");t.id=ae,t.style.display="none",t.style.position="fixed",t.style.top="50%",t.style.right="0",t.style.transform="translateY(-50%)",t.style.zIndex="200000000",t.style.fontFamily="sans-serif",t.innerHTML=`
+    <div class="dock-trigger">
+      <div class="dock-arrow">▶</div>
+    </div>
+    <div class="dock-content">
+      <ul class="dock-list">
+        <li class="dock-item">
+          <span class="dock-label">🪄 Magic Netsuite</span>
+          <label class="my-ext-switch">
+            <input id="${ce}" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+        </li>
+      </ul>
+    </div>
+  `;let e=document.createElement("style");e.textContent=re;let s=window.location.href.includes("/app/setup/mainsetup.nl"),n=window.location.href.includes("sc=-90"),o=new URL(window.location.href).searchParams.has("magicDashboardEnabler");if(s&&n){if(o){K("/processing",{executionSurface:!0}),N(),chrome.runtime.sendMessage({type:"UI_SOURCE",source:"page"});let c=document.getElementById(Pe),l=()=>{chrome.runtime.sendMessage({type:"DASHBOARD_ENABLER_READY",sessionId:new URL(window.location.href).searchParams.get("magicDashboardEnabler")})};c?c.addEventListener("load",l,{once:!0}):l();return}t.style.display="block",K(),document.head.appendChild(e),document.body.appendChild(t);let r=document.getElementById(ce);chrome.runtime.sendMessage({type:"UI_SOURCE",source:"page"});let{magic_netsuite_settings:i}=await chrome.storage.sync.get(["magic_netsuite_settings"])||{};i.openOnCustomizationPage?(console.log("[initMagicNetsuiteSettings] openOnCustomizationPage"),r.checked=!0,N()):(console.log("[initMagicNetsuiteSettings] !openOnCustomizationPage"),r.checked=!1),r.addEventListener("change",async()=>{r.checked?N():ie()})}};var De=`
+<svg id="magic-netsuite-logo" height="1.5rem" viewBox="0 0 231 189" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M101.121 0.28651C54.6933 2.26513 15.4319 12.9936 3.78105 26.8879C0.967244 30.2735 0.0439656 32.5599 0 36.2534C0 38.6717 0.263794 39.8588 1.14311 41.7495C6.94657 54.1049 32.2708 64.4816 69.2459 69.626C82.4356 71.4727 86.6563 71.8685 100.242 72.572C114.574 73.3194 136.601 72.7039 150.143 71.1649C182.457 67.6034 206.331 60.9201 220.532 51.5986C224.708 48.8286 228.973 44.2118 230.116 41.1339C234.908 28.251 220.092 16.5551 188.613 8.33288C164.431 2.04528 131.501 -0.988598 101.121 0.28651ZM127.5 19.7649C138.624 20.2925 143.812 20.7762 152.781 22.2272C170.675 25.1291 182.721 29.7899 184.7 34.5825C185.579 36.6051 185.227 37.8363 183.337 39.9468C178.413 45.355 161.31 50.1476 138.931 52.3901C130.05 53.2695 99.0985 53.1376 90.1296 52.1702C64.9372 49.4002 48.5381 44.0799 45.9441 37.7923C41.5036 27.1078 83.7985 17.7423 127.5 19.7649Z" fill="white"/>
+  <path d="M49.0657 78.7715C48.5821 81.9813 46.8674 93.2374 45.2846 103.746C41.6355 128.017 38.7338 147.188 37.5467 154.706C36.4036 161.961 36.5355 164.072 38.47 167.106C42.3389 173.13 49.5493 177.614 61.7718 181.572C90.3934 190.937 134.623 191.509 164.871 182.935C178.413 179.109 187.689 173.877 191.91 167.721C194.196 164.424 194.372 162.753 193.317 156.245C192.394 150.749 191.558 145.341 187.953 121.554C184.084 95.9635 180.523 73.2753 180.347 73.0995C180.259 73.0115 176.918 73.5392 172.961 74.2866C163.113 76.0894 150.363 77.6723 139.107 78.4637C128.248 79.2112 106.573 79.3431 95.4934 78.6836C82.2158 77.8921 64.6295 75.7376 54.8252 73.6271C49.6812 72.5718 50.1648 72.1761 49.0657 78.7715ZM103.979 102.691C106.045 105.373 109.387 109.726 111.453 112.408C113.519 115.046 118.663 121.729 122.884 127.226L130.578 137.251L130.71 117.42L130.798 97.5903H148.824V165.743H140.119C131.633 165.743 131.369 165.699 130.446 164.731C129.611 163.808 102.044 128.369 100.725 126.434C100.154 125.643 100.066 127.973 100.066 145.605L100.022 165.743H81.9959V97.5903L91.0968 97.6783L100.242 97.8102L103.979 102.691Z" fill="white"/>
+</svg>
+`,ue="magic-netsuite-dashboard-preview",H="magic-netsuite-dashboard-preview-slot",U=!1,Ne=t=>new Promise((e,s)=>{chrome.runtime.sendMessage(t,n=>{if(chrome.runtime.lastError){s(new Error(chrome.runtime.lastError.message));return}e(n)})}),He=async t=>{t.disabled=!0;try{let e=await Ne({type:"OPEN_DASHBOARD_PREVIEW"});if(!e?.ok)throw new Error(e?.error||"Could not open dashboard preview")}catch(e){console.error("[Magic Netsuite] Dashboard preview failed",e),t.title=e.message}finally{t.disabled=!1}},Ue=t=>{if(!U){document.getElementById(H)?.remove();return}if(document.getElementById(H))return;let e=t.closest('div[data-widget="MenuItem"][data-automation-id="-90"]');if(!e?.parentElement)return;document.getElementById(ue)?.remove();let s=document.createElement("div");s.id=H,Object.assign(s.style,{alignSelf:"stretch",display:"flex",alignItems:"center",justifyContent:"center",flex:"0 0 auto",padding:"0 6px",position:"relative",pointerEvents:"auto"});let n=document.createElement("button");n.id=ue,n.type="button",n.title="Open Magic NetSuite dashboard",n.setAttribute("aria-label","Open Magic NetSuite dashboard"),n.textContent="↗",Object.assign(n.style,{width:"28px",height:"28px",border:"1px solid rgba(255,255,255,.35)",borderRadius:"6px",background:"rgba(255,255,255,.08)",color:"#fff",cursor:"pointer",fontSize:"17px",lineHeight:"24px",position:"relative",zIndex:"1",pointerEvents:"auto"});for(let o of["pointerdown","mousedown"])n.addEventListener(o,r=>{r.preventDefault(),r.stopPropagation()});n.addEventListener("click",o=>{o.preventDefault(),o.stopImmediatePropagation(),o.stopPropagation(),He(n)}),s.appendChild(n),e.insertAdjacentElement("afterend",s)},V=()=>{let t=document.querySelector('div[data-widget="MenuItem"][data-automation-id="-90"] a span');t&&!t.querySelector("#magic-netsuite-logo")&&(t.insertAdjacentHTML("afterbegin",De),t.style.display="flex",t.style.alignItems="center",t.style.gap="0.5rem"),t&&Ue(t)},de=async()=>{U=(await chrome.storage.sync.get(["magic_netsuite_settings"])).magic_netsuite_settings?.dashboardPreviewEnabled===!0;let e=document.querySelector('div[data-widget="Menu"]')||document.body;new MutationObserver(V).observe(e,{childList:!0,subtree:!0}),V(),chrome.storage.onChanged.addListener((n,o)=>{o!=="sync"||!n.magic_netsuite_settings||(U=n.magic_netsuite_settings.newValue?.dashboardPreviewEnabled===!0,U?V():document.getElementById(H)?.remove())})};var me={},pe=()=>{document.addEventListener("keydown",t=>{me[t.key.toLowerCase()]=!0,location.hostname.includes("netsuite.com")}),document.addEventListener("keyup",t=>{me[t.key.toLowerCase()]=!1})};var he="magic-netsuite-palette",w=null,B=!1,Be=()=>{if(document.getElementById(he))return;let t=chrome.runtime.getURL("dist/vue-ui/palette.html");w=document.createElement("iframe"),w.id=he,w.src=t,w.allow="clipboard-read; clipboard-write",Object.assign(w.style,{position:"fixed",top:"0",left:"0",width:"100%",height:"100%",border:"none",zIndex:"19000000",opacity:"0",pointerEvents:"none",background:"transparent"}),document.body.appendChild(w)},je=()=>{w&&(B=!0,w.style.opacity="1",w.style.pointerEvents="auto",w.contentWindow.postMessage({type:"PALETTE_OPEN"},"*"))},Fe=()=>{w&&(B=!1,w.style.opacity="0",w.style.pointerEvents="none",window.focus())},Xe=()=>{B?w.contentWindow.postMessage({type:"PALETTE_OPEN"},"*"):je()},$e=t=>{let e=t.toLowerCase().split("+"),s=e[e.length-1],n=e.slice(0,-1);return{key:s,modifiers:n}},ge=async()=>{Be();let t="ctrl+m";try{let e=await chrome.storage.sync.get(["magic_netsuite_settings"]);e.magic_netsuite_settings?.modulesSearch&&(t=e.magic_netsuite_settings.modulesSearch)}catch{}chrome.storage.onChanged.addListener(e=>{e.magic_netsuite_settings?.newValue?.modulesSearch&&(t=e.magic_netsuite_settings.newValue.modulesSearch)}),document.addEventListener("keydown",e=>{let{key:s,modifiers:n}=$e(t),o=n.includes("ctrl")?e.ctrlKey||e.metaKey:!e.ctrlKey&&!e.metaKey,r=n.includes("alt")?e.altKey:!e.altKey,i=n.includes("shift")?e.shiftKey:!e.shiftKey,c=e.key.toLowerCase()===s;if(o&&r&&i&&c){let l=document.activeElement?.tagName?.toLowerCase();if((["input","textarea","select"].includes(l)||document.activeElement?.isContentEditable)&&!B)return;e.preventDefault(),e.stopPropagation(),Xe()}}),window.addEventListener("message",e=>{e.data?.type==="PALETTE_CLOSE"&&Fe()})};var fe=async()=>{try{console.log("[Magic Netsuite] Initializing...");let t=G();W(Y,t),te(t),se(),ne(),await de(),await le(),await ge(),pe(),console.log("[Magic Netsuite] Initialization complete")}catch(t){console.error("[Magic Netsuite] Initialization error:",t)}};(async()=>{try{await fe()}catch(t){console.error("[Magic Netsuite] Failed to load content module:",t)}})();})();

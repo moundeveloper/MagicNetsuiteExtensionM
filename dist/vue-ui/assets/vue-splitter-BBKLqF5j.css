@@ -1,0 +1,1 @@
+.vue-splitter{height:inherit;display:grid}.vue-splitter.vertical{width:100%}.vue-splitter.vertical>.splitter{cursor:ew-resize;width:5px}.vue-splitter.horizontal{height:100%}.vue-splitter.horizontal>.splitter{cursor:ns-resize;height:5px}.vue-splitter .splitter{background-color:#9e9e9e}.vue-splitter .splitter-pane{overflow-y:auto}

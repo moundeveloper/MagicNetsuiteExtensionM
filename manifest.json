@@ -62,7 +62,6 @@
         "netsuiteApi/suiteQL.js",
         "netsuiteApi/netsuiteApi.js",
         "netsuiteApi/serverScriptManager.js",
-        "netsuiteApi/content.js",
         "netsuiteApi/customRecords.js",
         "netsuiteApi/sandboxCode.js",
         "netsuiteApi/exportRecord.js",
@@ -71,15 +70,6 @@
         "netsuiteApi/lists.js",
         "netsuiteApi/advancedPdfTemplates.js",
         "dist/vue-ui/*",
-        "content/content_export.js",
-        "content/core/injection/*.js",
-        "content/core/messaging/*.js",
-        "content/core/interceptors/*.js",
-        "content/utils/*.js",
-        "content/ui/**/*.js",
-        "content/keyboard/*.js",
-        "content/elementScreenshotPicker.js",
-        "content/modules/*.js",
         "globalUtils.js"
       ],
       "matches": ["*://*.app.netsuite.com/*"]
@@ -92,8 +82,14 @@
       "run_at": "document_idle"
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["content/elementScreenshotPicker.js"],
+      "matches": ["*://*.app.netsuite.com/*"],
+      "js": ["content/elementScreenshotShortcut.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://*.app.netsuite.com/app/help/helpcenter.nl*"],
+      "js": ["content/quizCitationFrame.js"],
       "all_frames": true,
       "run_at": "document_idle"
     },

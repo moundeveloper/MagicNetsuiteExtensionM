@@ -1,0 +1,8 @@
+allowBuilds:
+  esbuild: true
+overrides:
+  fast-uri: ^3.1.4
+  postcss: ^8.5.18
+minimumReleaseAgeExclude:
+  - '@lucide/vue@1.24.0'
+  - '@modelcontextprotocol/sdk@1.30.0'

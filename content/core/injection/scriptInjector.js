@@ -1,14 +1,1 @@
-export const injectScript = (file) => {
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL(file);
-
-  script.onload = function () {
-    this.remove();
-  };
-
-  (document.head || document.documentElement).appendChild(script);
-};
-
-export const injectScripts = (scripts) => {
-  scripts.forEach((script) => injectScript(script));
-};
+const c=()=>{const t=new Uint8Array(32);return crypto.getRandomValues(t),Array.from(t,e=>e.toString(16).padStart(2,"0")).join("")},i=(t,e)=>{const r=document.createElement("script"),n=new URL(chrome.runtime.getURL(t));t.endsWith("/netsuiteApi.js")&&n.searchParams.set("bridgeCapability",e),r.src=n.toString(),r.onload=function(){this.remove()},(document.head||document.documentElement).appendChild(r)},o=(t,e)=>{t.forEach(r=>i(r,e))};export{c as createBridgeCapability,i as injectScript,o as injectScripts};

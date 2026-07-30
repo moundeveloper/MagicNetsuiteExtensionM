@@ -1,14 +1,1 @@
-let keysPressed = {};
-
-export const setupKeyboardShortcuts = () => {
-  document.addEventListener("keydown", (e) => {
-    keysPressed[e.key.toLowerCase()] = true;
-
-    const isNetSuiteByUrl = location.hostname.includes("netsuite.com");
-    if (!isNetSuiteByUrl) return;
-  });
-
-  document.addEventListener("keyup", (e) => {
-    keysPressed[e.key.toLowerCase()] = false;
-  });
-};
+let t={};const s=()=>{document.addEventListener("keydown",e=>{t[e.key.toLowerCase()]=!0,location.hostname.includes("netsuite.com")}),document.addEventListener("keyup",e=>{t[e.key.toLowerCase()]=!1})};export{s as setupKeyboardShortcuts};

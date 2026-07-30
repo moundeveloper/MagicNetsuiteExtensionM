@@ -1,0 +1,1 @@
+import{it as e}from"./basecomponent-CJ747krd.js";var t=e();export{t};

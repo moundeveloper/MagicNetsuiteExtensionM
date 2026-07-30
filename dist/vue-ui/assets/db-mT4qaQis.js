@@ -1,0 +1,1 @@
+import{t as e}from"./import-wrapper-prod-1od8ya-I.js";var t=class extends e{constructor(){super(`slate-workspace`),this.version(1).stores({pages:`id, parentId, trashedAt, isFavorite, updatedAt`,blocks:`id, pageId, [pageId+position]`,settings:`key`})}};const n=new t;function r(){return crypto.randomUUID()}function i(){return new Date().toISOString()}export{r as i,n,i as r,t};
