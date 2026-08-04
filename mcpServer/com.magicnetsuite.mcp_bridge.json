@@ -1,9 +1,0 @@
-{
-    "name":  "com.magicnetsuite.mcp_bridge",
-    "description":  "Magic Netsuite MCP native messaging bridge",
-    "path":  "C:\\Projects\\MagicNetsuiteExtensionM\\mcpServer\\magicNetsuiteNativeHost.exe",
-    "type":  "stdio",
-    "allowed_origins":  [
-                            "chrome-extension://nnkjegioomnaelmeiemdfmhipcpgomlp/"
-                        ]
-}
