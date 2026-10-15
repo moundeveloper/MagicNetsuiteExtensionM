@@ -38,6 +38,28 @@ let context = null;
 let page = null;
 let templateReviewPage = null;
 let launching = null;
+// A crashed page is not isClosed(), so without tracking it ensurePage() would
+// keep handing it out and every Suitelet tool would fail until closed by hand.
+const crashedPages = new WeakSet();
+function isUsablePage(candidate) {
+    return Boolean(candidate && !candidate.isClosed() && !crashedPages.has(candidate));
+}
+const watchedPages = new WeakSet();
+function watchPage(target) {
+    if (watchedPages.has(target))
+        return;
+    watchedPages.add(target);
+    target.on("close", () => {
+        if (page === target)
+            page = null;
+    });
+    target.on("crash", () => {
+        crashedPages.add(target);
+        if (page === target)
+            page = null;
+        target.close().catch(() => undefined);
+    });
+}
 let templateReviewState = null;
 let templateReviewBindingReady = false;
 const templateReviewWaiters = new Set();
@@ -53,12 +75,32 @@ function dismissTemplateReviewSurface() {
         applyTemplateReviewUpdate({ status: "done", feedback: "" });
     }
 }
-async function launch() {
-    const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+async function launchContext() {
+    const options = {
         headless: false, // actions must be visible (user requirement)
         viewport: null, // null + --start-maximized => real maximized window
         args: ["--start-maximized"],
-    });
+    };
+    // The profile dir is single-instance. Right after the user closes the window
+    // (or while another session's Chromium is shutting down) the lock is still
+    // held, so retry briefly before giving up with an actionable message.
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            return await chromium.launchPersistentContext(PROFILE_DIR, options);
+        }
+        catch (error) {
+            lastError = error;
+            await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
+        }
+    }
+    const detail = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`Could not launch the Suitelet control browser (profile ${PROFILE_DIR}). ` +
+        "Another Magic NetSuite session may already have it open; close that Chromium window and retry. " +
+        `Details: ${detail}`);
+}
+async function launch() {
+    const ctx = await launchContext();
     context = ctx;
     ctx.on("close", () => {
         context = null;
@@ -80,10 +122,7 @@ async function launch() {
         /* corrupt/absent state — user just logs in again */
     }
     const p = ctx.pages()[0] ?? (await ctx.newPage());
-    p.on("close", () => {
-        if (page === p)
-            page = null;
-    });
+    watchPage(p);
     page = p;
     return p;
 }
@@ -99,18 +138,15 @@ async function saveState() {
     }
 }
 async function ensurePage() {
-    if (page && !page.isClosed())
+    if (isUsablePage(page))
         return page;
     // Page died (e.g. a bad eval closed the tab) but the context is still alive:
     // open a fresh page in the SAME context. Relaunching would try to re-lock the
     // profile dir and collide with the existing Chromium window.
     if (context) {
         try {
-            const np = (context.pages().find((pg) => !pg.isClosed())) ?? (await context.newPage());
-            np.on("close", () => {
-                if (page === np)
-                    page = null;
-            });
+            const np = context.pages().find((pg) => isUsablePage(pg)) ?? (await context.newPage());
+            watchPage(np);
             page = np;
             return np;
         }
@@ -803,6 +839,42 @@ export const playwrightController = {
     async screenshot() {
         const p = await ensurePage();
         return { ok: true, url: p.url(), screenshot: await screenshotB64(p) };
+    },
+    // Small, low-quality frame for live viewers. Never launches the browser:
+    // with no controlled page open it answers idle instead.
+    async thumbnail(opts = {}) {
+        if (!isUsablePage(page)) {
+            return { ok: false, idle: true, message: "No controlled Suitelet page is open." };
+        }
+        const p = page;
+        const maxWidth = Math.min(1600, Math.max(160, Math.round(opts.maxWidth ?? 720)));
+        const quality = Math.min(90, Math.max(10, Math.round(opts.quality ?? 45)));
+        const view = await p.evaluate(() => ({
+            x: window.scrollX,
+            y: window.scrollY,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        }));
+        const scale = Math.min(1, maxWidth / Math.max(1, view.width));
+        const cdp = await p.context().newCDPSession(p);
+        try {
+            const { data } = await cdp.send("Page.captureScreenshot", {
+                format: "jpeg",
+                quality,
+                clip: { x: view.x, y: view.y, width: view.width, height: view.height, scale },
+            });
+            return {
+                ok: true,
+                url: p.url(),
+                title: await p.title(),
+                width: Math.round(view.width * scale),
+                height: Math.round(view.height * scale),
+                screenshot: data,
+            };
+        }
+        finally {
+            await cdp.detach().catch(() => undefined);
+        }
     },
     async click(opts) {
         const p = await ensurePage();

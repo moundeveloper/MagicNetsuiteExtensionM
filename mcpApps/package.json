@@ -6,8 +6,9 @@
   "description": "Interactive MCP App for sending NetSuite files and records into Claude chat.",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc --noEmit && cross-env INPUT=mcp-app.html vite build && cross-env INPUT=template-review.html vite build && tsc -p tsconfig.server.json",
-    "test": "tsx --test test/*.test.ts && node --test ../src/content/core/messaging/bridgeSecurity.test.mjs",
+    "build": "tsc --noEmit && cross-env INPUT=mcp-app.html vite build && cross-env INPUT=template-review.html vite build && pnpm run build:server",
+    "build:server": "tsc -p tsconfig.server.json && node scripts/copyDashboardAssets.mjs",
+    "test": "pnpm run build:server && tsx --test test/*.test.ts && node --test ../extension-src/tests/bridgeSecurity.test.mjs",
     "start": "concurrently \"cross-env NODE_ENV=development INPUT=mcp-app.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=template-review.html vite build --watch\" \"tsx watch main.ts\"",
     "start:stdio": "pnpm run build 1>&2 && node dist/main.js --stdio",
     "serve": "node dist/main.js",

@@ -108,6 +108,7 @@
     }
   ],
   "permissions": [
+    "alarms",
     "sidePanel",
     "clipboardWrite",
     "tabs",

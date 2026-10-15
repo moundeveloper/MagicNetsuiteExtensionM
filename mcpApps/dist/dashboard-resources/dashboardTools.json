@@ -1,0 +1,365 @@
+[
+  {
+    "name": "magic_netsuite_dashboard_catalog",
+    "description": "Discover the dynamic dashboard component catalog, binding syntax, custom component templates, and SuiteScript execution limits. Call before creating dashboards.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_list",
+    "description": "List persistent dynamic dashboards. Search before creating duplicates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Optional search text."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_get",
+    "description": "Read a dashboard's full layout, reusable components and actions code before editing.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        }
+      },
+      "required": ["dashboardId"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_create",
+    "description": "Create a persistent reactive SuiteScript dashboard, not a standalone MVC app. definition requires name,title,description,mode(client/server/hybrid),tags,initialState,layout,components,actions. Get catalog first. Nodes use {id,type,props,children,bind,actionId,input,visible}; values bind with {$bind:'state.field'} or {$bind:'results.actionId.result.field'}. Actions require {id,title,mode,risk,inputSchema,input,steps:[{id,domain,modules,code}]}. Modules are short names. Code reads input,previous,steps,context.modules and returns JSON; server is synchronous. Custom components use components.Name={description,template:[nodes]}, instantiated by custom:Name; props bindings use props.field. Creation never runs actions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "definition": {
+          "type": "object",
+          "description": "Complete dashboard definition. Use catalog for supported components and execution contract."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        }
+      },
+      "required": ["definition"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_update",
+    "description": "Partially update a dashboard's metadata, layout, custom components or complete actions list. Omitted fields are preserved. Arrays are replaced. Requires current revision. Never runs code.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "expectedRevision": {
+          "type": "number",
+          "description": "Revision returned by get/create/update. Required to prevent stale edits or execution."
+        },
+        "patch": {
+          "type": "object",
+          "description": "Partial definition: name,title,description,mode,tags,initialState,layout,components,actions."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        }
+      },
+      "required": ["dashboardId", "expectedRevision", "patch"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_delete",
+    "description": "Delete a persistent dashboard and its action definitions. Requires current revision.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "expectedRevision": {
+          "type": "number",
+          "description": "Revision returned by get/create/update. Required to prevent stale edits or execution."
+        }
+      },
+      "required": ["dashboardId", "expectedRevision"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_action",
+    "description": "Create/update/delete one action and its SuiteScript code. upsert replaces the complete action with the same id. delete requires removing referencing buttons from layout/components first. Requires current revision.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "expectedRevision": {
+          "type": "number",
+          "description": "Revision returned by get/create/update. Required to prevent stale edits or execution."
+        },
+        "operation": {
+          "type": "string",
+          "enum": ["upsert", "delete"],
+          "description": "Action operation."
+        },
+        "action": {
+          "type": "object",
+          "description": "Complete action for upsert: id,title,mode,risk,inputSchema,input,steps."
+        },
+        "actionId": {
+          "type": "string",
+          "description": "Action id for delete."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        }
+      },
+      "required": ["dashboardId", "expectedRevision", "operation"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_run",
+    "description": "Explicitly execute a reviewed saved dashboard action on the routed NetSuite account. Never call merely to create or preview a dashboard. Hybrid steps run sequentially, passing previous and steps results. Execution stops on errors; earlier writes are not rolled back. Requires current revision.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "expectedRevision": {
+          "type": "number",
+          "description": "Revision returned by get/create/update. Required to prevent stale edits or execution."
+        },
+        "actionId": {
+          "type": "string",
+          "description": "Saved action id."
+        },
+        "input": {
+          "description": "Concrete JSON input matching inputSchema; may be object, array, scalar or null."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Include intermediate step outputs. Default returns final result and setState only."
+        }
+      },
+      "required": ["dashboardId", "expectedRevision", "actionId", "input"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_node",
+    "description": "Atomically upsert or remove nodes by id in layout, children or named slots. Existing upserts replace the node. New nodes append to parentId/slot or root. component targets a custom component template. Requires revision; validates before saving.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current dashboard revision."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": ["upsert", "remove"]
+              },
+              "id": {
+                "type": "string"
+              },
+              "node": {
+                "type": "object"
+              },
+              "parentId": {
+                "type": "string"
+              },
+              "slot": {
+                "type": "string"
+              },
+              "component": {
+                "type": "string"
+              }
+            },
+            "required": ["op", "id"]
+          }
+        }
+      },
+      "required": ["dashboardId", "expectedRevision", "operations"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_validate",
+    "description": "Dry-run complete definition or stored dashboard plus patch. Returns valid, errors and warnings for schemas, bindings, missing actions, state fields, modules and duplicate ids. Never saves or runs code.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "definition": {
+          "type": "object"
+        },
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "patch": {
+          "type": "object"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_render",
+    "description": "Inspect actual Vue rendered text from the active dashboard, or an initial-state preview if no live view is open. Returns source, revision and text. Preview runs no actions or refresh; text can be truncated. No fabricated screenshot.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        }
+      },
+      "required": ["dashboardId"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_code",
+    "description": "Upsert/delete a stored source file referenced by step.codeFile or library.codeFile. source is literal code. Local MCP also accepts filePath to read UTF-8 without JSON escaping. Shared libraries return synchronous helper objects accessed as lib.Name.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current dashboard revision."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        },
+        "operation": {
+          "type": "string",
+          "enum": ["upsert", "delete"]
+        },
+        "name": {
+          "type": "string",
+          "description": "Portable relative source name, e.g. actions/reset.js."
+        },
+        "source": {
+          "type": "string"
+        },
+        "filePath": {
+          "type": "string",
+          "description": "Local UTF-8 code file path; only local MCP transports."
+        }
+      },
+      "required": ["dashboardId", "expectedRevision", "operation", "name"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_export",
+    "description": "Export portable dashboard JSON including sourceFiles. Local MCP directory optionally writes dashboard.json plus source files there without overwriting existing files unless overwrite:true.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "directory": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean"
+        }
+      },
+      "required": ["dashboardId"]
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_import",
+    "description": "Import portable export as a new dashboard. Supply payload or local filePath to dashboard.json. Optional newName avoids conflicts. Validates without running code.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "object"
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "newName": {
+          "type": "string"
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "magic_netsuite_dashboard_history",
+    "description": "List retained versions (up to 20, bounded by storage), read revision definition, or restoreRevision as a new current revision. Restore requires expectedRevision. Never executes code.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dashboardId": {
+          "type": "string",
+          "description": "Exact dashboard id or name."
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current dashboard revision."
+        },
+        "restoreRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current dashboard revision."
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current dashboard revision."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Return full saved definition. Default false returns revision and changed ids only."
+        }
+      },
+      "required": ["dashboardId"]
+    }
+  }
+]

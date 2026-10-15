@@ -76,8 +76,19 @@ export async function startStreamableHTTPServer(createServerInstance) {
     process.on("SIGTERM", shutdown);
 }
 export async function startStdioServer(createServerInstance) {
+    // When the client closes stdio, exit. Otherwise the Chromium child and the
+    // bridge socket keep this process alive as an orphan that holds the
+    // Playwright profile lock, and the next session cannot launch the browser.
+    const exitOnStdinClose = () => process.exit(0);
+    process.stdin.once("end", exitOnStdinClose);
+    process.stdin.once("close", exitOnStdinClose);
     await createServerInstance().connect(new StdioServerTransport());
 }
+// A stray rejected promise must not kill the MCP server (Node exits on
+// unhandled rejections); log it to stderr, which is not the MCP channel.
+process.on("unhandledRejection", (reason) => {
+    console.error("[magic-netsuite-apps] unhandled rejection:", reason);
+});
 async function main() {
     if (process.argv.includes("--stdio")) {
         await startStdioServer(createServer);
