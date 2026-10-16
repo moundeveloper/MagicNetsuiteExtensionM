@@ -1,1 +1,0 @@
-import"./editor.api-yzX1HZZH.js";import{n as e,t}from"./typescript-BRwr4MtF.js";export{t as conf,e as language};

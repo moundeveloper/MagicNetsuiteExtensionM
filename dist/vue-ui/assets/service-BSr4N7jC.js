@@ -1,1 +1,0 @@
-import{it as e}from"./basecomponent-Byr_e-yj.js";var t=e();export{t};

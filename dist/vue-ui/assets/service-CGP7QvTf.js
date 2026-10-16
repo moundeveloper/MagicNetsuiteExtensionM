@@ -1,0 +1,1 @@
+import{it as e}from"./basecomponent-BRrWshcW.js";var t=e();export{t};

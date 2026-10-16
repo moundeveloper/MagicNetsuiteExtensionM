@@ -840,42 +840,6 @@ export const playwrightController = {
         const p = await ensurePage();
         return { ok: true, url: p.url(), screenshot: await screenshotB64(p) };
     },
-    // Small, low-quality frame for live viewers. Never launches the browser:
-    // with no controlled page open it answers idle instead.
-    async thumbnail(opts = {}) {
-        if (!isUsablePage(page)) {
-            return { ok: false, idle: true, message: "No controlled Suitelet page is open." };
-        }
-        const p = page;
-        const maxWidth = Math.min(1600, Math.max(160, Math.round(opts.maxWidth ?? 720)));
-        const quality = Math.min(90, Math.max(10, Math.round(opts.quality ?? 45)));
-        const view = await p.evaluate(() => ({
-            x: window.scrollX,
-            y: window.scrollY,
-            width: window.innerWidth,
-            height: window.innerHeight,
-        }));
-        const scale = Math.min(1, maxWidth / Math.max(1, view.width));
-        const cdp = await p.context().newCDPSession(p);
-        try {
-            const { data } = await cdp.send("Page.captureScreenshot", {
-                format: "jpeg",
-                quality,
-                clip: { x: view.x, y: view.y, width: view.width, height: view.height, scale },
-            });
-            return {
-                ok: true,
-                url: p.url(),
-                title: await p.title(),
-                width: Math.round(view.width * scale),
-                height: Math.round(view.height * scale),
-                screenshot: data,
-            };
-        }
-        finally {
-            await cdp.detach().catch(() => undefined);
-        }
-    },
     async click(opts) {
         const p = await ensurePage();
         let target = null;

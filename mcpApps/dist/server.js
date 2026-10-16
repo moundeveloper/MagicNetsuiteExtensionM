@@ -1492,19 +1492,6 @@ export function createServer() {
         const data = parseToolJson(await callExtensionTool("netsuite_suitelet_stream_frame"));
         return toolResult(isRecord(data) ? data : { value: data }, "Suitelet frame captured.");
     });
-    server.registerTool("magic_netsuite_suitelet_stream_thumbnail", {
-        title: "Get Suitelet Thumbnail",
-        description: "INTERNAL viewer transport for live Suitelet panes — agents should NOT use this. Returns a small JPEG of the controlled Suitelet, or idle when none is open; never opens a browser. To see the Suitelet, use magic_netsuite_suitelet_screenshot.",
-        inputSchema: {
-            maxWidth: z.number().optional(),
-            quality: z.number().optional(),
-        },
-    }, async ({ maxWidth, quality }) => {
-        if (!USE_PLAYWRIGHT) {
-            return toolResult({ ok: false, idle: true }, "Thumbnails need the Playwright controller (MAGIC_NS_PLAYWRIGHT).");
-        }
-        return controlToolResult(await playwrightController.thumbnail({ maxWidth, quality }), "Suitelet thumbnail captured.");
-    });
     server.registerTool("magic_netsuite_suitelet_stream_input", {
         title: "Send Suitelet Stream Input",
         description: "INTERNAL viewer transport for the MCP App UI (forwards raw coordinate mouse/wheel/key events) — agents should NOT use this; coordinate input is unreliable. Use the dedicated tools instead: magic_netsuite_suitelet_scroll, _hover, _click, _fill.",
